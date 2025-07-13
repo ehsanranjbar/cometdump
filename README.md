@@ -10,6 +10,7 @@ A Go library and CLI tool for efficiently storing and retrieving CometBFT blockc
 - 💾 **Compressed Storage**: Blocks are stored in compressed [msgpack](https://msgpack.org/index.html) format using [Brotli](https://github.com/google/brotli) compression
 - 🔍 **Smart Node Discovery**: Automatically discover and select the best nodes from the network
 - ⚡ **Iterator Interface**: Stream through blocks with Go's iterator pattern
+- 🌐 **RPC Mirror**: Serve stored blockchain data via CometBFT-compatible JSON-RPC endpoints
 - 🔧 **Configurable Sync**: Flexible sync configuration with version constraints and chunk sizing
 
 ## Installation
@@ -48,7 +49,6 @@ func main() {
     logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
         Level: slog.LevelInfo,
     }))
-
     // Configure sync options and sync blocks from CometBFT nodes
     config := cometdump.DefaultSyncConfig("https://cosmos-rpc.publicnode.com:443/").
         WithExpandRemotes(true).                    // Discover additional nodes
@@ -82,23 +82,59 @@ func main() {
             break
         }
     }
-
-    // Access a specific block using BlockAt method
-    fmt.Println("\nAccessing specific block:")
-    block, err := store.BlockAt(500)
-    if err != nil {
-        log.Printf("Block not found: %v", err)
-        return
-    }
-
-    fmt.Printf("Block %d:\n", block.Block.Height)
-    fmt.Printf("  Hash: %s\n", block.Block.Hash())
-    fmt.Printf("  Time: %s\n", block.Block.Time)
-    fmt.Printf("  Transactions: %d\n", len(block.Block.Data.Txs))
-    fmt.Printf("  Transaction Results: %d\n", len(block.TxResults))
-    fmt.Printf("  Block Events: %d\n", len(block.FinalizeBlockEvents))
 }
 ```
+
+### RPC Server Example
+
+CometDump includes an RPC server that provides CometBFT-compatible JSON-RPC endpoints for accessing stored blockchain data:
+
+```go
+package main
+
+import (
+    "log"
+    "net/http"
+    "os"
+
+    cometlog "github.com/cometbft/cometbft/v2/libs/log"
+    rpcserver "github.com/cometbft/cometbft/v2/rpc/jsonrpc/server"
+    "github.com/ehsanranjbar/cometdump"
+)
+
+func main() {
+    // Open the store
+    store, err := cometdump.Open("./blockchain-data")
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    // Create RPC server and register routes
+    mux := http.NewServeMux()
+    server := cometdump.NewRPCServer(store)
+    logger := cometlog.NewLogger(os.Stdout)
+    rpcserver.RegisterRPCFuncs(mux, server.GetRoutes(), logger)
+
+    // Start the RPC server
+    listener, err := rpcserver.Listen("tcp://localhost:8080", 0)
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    log.Println("Starting RPC server", "address", "http://localhost:8080")
+
+    if err := rpcserver.Serve(listener, mux, logger, rpcserver.DefaultConfig()); err != nil {
+        log.Fatal(err)
+    }
+}
+```
+
+The RPC server provides the following CometBFT-compatible endpoints:
+
+- `GET /block?height=N` - Get block at specific height
+- `GET /block_results?height=N` - Get block results (transaction results, events)
+- `GET /blockchain?minHeight=N&maxHeight=M` - Get block headers in range
+- `GET /header?height=N` - Get block header at specific height
 
 ## Requirements
 
