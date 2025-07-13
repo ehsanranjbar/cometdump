@@ -126,22 +126,23 @@ func BlockRecordFromRPCResults(block *coretypes.ResultBlock, blockResults *coret
 }
 
 // ToResultBlock converts the resultBlockProto back to a ResultBlock.
-func (b *BlockRecord) ToResultBlock() (*coretypes.ResultBlock, error) {
+func (b *BlockRecord) ToResultBlock() *coretypes.ResultBlock {
 	if b == nil {
-		return nil, nil
+		return nil
 	}
 
 	return &coretypes.ResultBlock{
 		BlockID: b.BlockID,
 		Block:   b.Block,
-	}, nil
+	}
 }
 
 // ToResultBlockResults converts the Block to a ResultBlockResults.
-func (b *BlockRecord) ToResultBlockResults() (*coretypes.ResultBlockResults, error) {
+func (b *BlockRecord) ToResultBlockResults() *coretypes.ResultBlockResults {
 	if b == nil {
-		return nil, nil
+		return nil
 	}
+
 	return &coretypes.ResultBlockResults{
 		Height:                b.Block.Height,
 		TxResults:             b.TxResults,
@@ -149,5 +150,5 @@ func (b *BlockRecord) ToResultBlockResults() (*coretypes.ResultBlockResults, err
 		ValidatorUpdates:      b.ValidatorUpdates,
 		ConsensusParamUpdates: b.ConsensusParamUpdates,
 		AppHash:               b.BlockResultsAppHash,
-	}, nil
+	}
 }

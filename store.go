@@ -23,7 +23,7 @@ import (
 type Store struct {
 	mu     sync.RWMutex
 	dir    string
-	chunks Chunks
+	chunks chunks
 }
 
 // Open initializes a new Store at the specified path
@@ -203,7 +203,7 @@ func (s *Store) Sync(ctx context.Context, conf SyncConfig) error {
 		}
 		records := blockRecordsFromRPCResults(blocks, blockResults)
 		pushToChannel(records, conf.OutputChan)
-		err = s.storeRecords(records, int64(conf.ChunkSize), logger)
+		err = s.storeRecords(records, logger)
 		if err != nil {
 			return fmt.Errorf("failed to store records: %w", err)
 		}
@@ -218,7 +218,7 @@ func (s *Store) Sync(ctx context.Context, conf SyncConfig) error {
 }
 
 func (s *Store) lastStoredHeight() int64 {
-	return s.chunks.EndHeight()
+	return s.chunks.endHeight()
 }
 
 type fetchJob struct {
@@ -394,7 +394,7 @@ func pushToChannel[T any](records []T, outputChan chan<- T) {
 	}
 }
 
-func (s *Store) storeRecords(recs []*BlockRecord, chunkSize int64, logger *slog.Logger) error {
+func (s *Store) storeRecords(recs []*BlockRecord, logger *slog.Logger) error {
 	startHeight := recs[0].Block.Height
 	endHeight := recs[len(recs)-1].Block.Height
 	file, err := s.createChunkFile(startHeight, endHeight)
@@ -424,13 +424,10 @@ func (s *Store) storeRecords(recs []*BlockRecord, chunkSize int64, logger *slog.
 		return fmt.Errorf("failed to close brotli writer: %w", err)
 	}
 
-	chunk := Chunk{
-		FromHeight: startHeight,
-		ToHeight:   endHeight,
-	}
-	s.insertChunk(chunk)
+	chk := newChunk(startHeight, endHeight)
+	s.insertChunk(chk)
 
-	logger.Info("Stored chunk", "filename", chunk.filename())
+	logger.Info("Stored chunk", "filename", chk.filename())
 
 	return nil
 }
@@ -445,16 +442,16 @@ func (s *Store) createChunkFile(startHeight, endHeight int64) (*os.File, error) 
 	return file, nil
 }
 
-func (s *Store) insertChunk(chunk Chunk) {
-	idx, _ := slices.BinarySearchFunc(s.chunks, chunk, func(e, t Chunk) int {
-		if e.FromHeight < t.FromHeight {
+func (s *Store) insertChunk(chk chunk) {
+	idx, _ := slices.BinarySearchFunc(s.chunks, chk, func(e, t chunk) int {
+		if e.fromHeight < t.fromHeight {
 			return -1
-		} else if e.FromHeight > t.FromHeight {
+		} else if e.fromHeight > t.fromHeight {
 			return 1
 		}
 		return 0
 	})
-	s.chunks = slices.Insert(s.chunks, idx, chunk)
+	s.chunks = slices.Insert(s.chunks, idx, chk)
 }
 
 // Blocks returns an iterator which iterates over all BlockRecords in the store with order
@@ -463,17 +460,17 @@ func (s *Store) Blocks() iter.Seq2[*BlockRecord, error] {
 		s.mu.RLock()
 		defer s.mu.RUnlock()
 
-		for _, chunk := range s.chunks {
-			iter, err := s.iterChunk(chunk, 0)
+		for _, chk := range s.chunks {
+			iter, err := s.iterChunk(chk, 0)
 			if err != nil {
-				err = fmt.Errorf("failed to iterate chunk %s: %w", chunk.filename(), err)
+				err = fmt.Errorf("failed to iterate chunk %s: %w", chk.filename(), err)
 				yield(nil, err)
 				return
 			}
 
 			for rec, err := range iter {
 				if err != nil {
-					err = fmt.Errorf("failed to read record from chunk %s: %w", chunk.filename(), err)
+					err = fmt.Errorf("failed to read record from chunk %s: %w", chk.filename(), err)
 				}
 				if !yield(rec, err) {
 					return
@@ -483,10 +480,10 @@ func (s *Store) Blocks() iter.Seq2[*BlockRecord, error] {
 	}
 }
 
-func (s *Store) iterChunk(chunk Chunk, skip int) (iter.Seq2[*BlockRecord, error], error) {
-	file, err := s.openChunk(chunk)
+func (s *Store) iterChunk(chk chunk, skip int) (iter.Seq2[*BlockRecord, error], error) {
+	file, err := s.openChunk(chk)
 	if err != nil {
-		return nil, fmt.Errorf("failed to open chunk file %s: %w", chunk.filename(), err)
+		return nil, fmt.Errorf("failed to open chunk file %s: %w", chk.filename(), err)
 	}
 
 	br := brotli.NewReader(file)
@@ -521,8 +518,8 @@ func (s *Store) iterChunk(chunk Chunk, skip int) (iter.Seq2[*BlockRecord, error]
 	}, nil
 }
 
-func (s *Store) openChunk(chunk Chunk) (*os.File, error) {
-	filePath := filepath.Join(s.dir, chunk.filename())
+func (s *Store) openChunk(chk chunk) (*os.File, error) {
+	filePath := filepath.Join(s.dir, chk.filename())
 	file, err := os.Open(filePath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open file %s: %w", filePath, err)
@@ -539,14 +536,14 @@ func (s *Store) BlockAt(height int64) (*BlockRecord, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	chunk, ok := s.chunks.FindForHeight(height)
+	chk, ok := s.chunks.findForHeight(height)
 	if !ok {
 		return nil, fmt.Errorf("block at height %d not found", height)
 	}
-	skip := int(height - chunk.FromHeight)
-	iter, err := s.iterChunk(chunk, skip)
+	skip := int(height - chk.fromHeight)
+	iter, err := s.iterChunk(chk, skip)
 	if err != nil {
-		return nil, fmt.Errorf("failed to iterate chunk %s: %w", chunk.filename(), err)
+		return nil, fmt.Errorf("failed to iterate chunk %s: %w", chk.filename(), err)
 	}
 	for rec, err := range iter {
 		if err != nil {
@@ -556,4 +553,45 @@ func (s *Store) BlockAt(height int64) (*BlockRecord, error) {
 	}
 
 	return nil, fmt.Errorf("block at height %d not found", height)
+}
+
+// BlocksInRange returns a list of BlockRecords in the specified height range.
+func (s *Store) BlocksInRange(startHeight, endHeight int64) ([]*BlockRecord, error) {
+	if startHeight < 1 || endHeight < 1 || startHeight > endHeight {
+		return nil, fmt.Errorf("invalid height range: %d-%d", startHeight, endHeight)
+	}
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var records []*BlockRecord
+	for _, chk := range s.chunks {
+		if chk.toHeight < startHeight {
+			continue
+		}
+		if chk.fromHeight > endHeight {
+			break
+		}
+
+		skip := 0
+		if chk.fromHeight < startHeight && chk.toHeight >= startHeight {
+			skip = int(startHeight - chk.fromHeight)
+		}
+		iter, err := s.iterChunk(chk, skip)
+		if err != nil {
+			return nil, fmt.Errorf("failed to iterate chunk %s: %w", chk.filename(), err)
+		}
+
+		for rec, err := range iter {
+			if err != nil {
+				return nil, fmt.Errorf("failed to read record from chunk %s: %w", chk.filename(), err)
+			}
+			if rec.Block.Height > endHeight {
+				break // No need to continue if we've passed the end height
+			}
+			records = append(records, rec)
+		}
+	}
+
+	return records, nil
 }
