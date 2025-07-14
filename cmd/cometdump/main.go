@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -10,6 +11,8 @@ import (
 	"syscall"
 	"time"
 
+	abcitypes "github.com/cometbft/cometbft/v2/abci/types"
+	cometjson "github.com/cometbft/cometbft/v2/libs/json"
 	cometlog "github.com/cometbft/cometbft/v2/libs/log"
 	rpcserver "github.com/cometbft/cometbft/v2/rpc/jsonrpc/server"
 	"github.com/ehsanranjbar/cometdump"
@@ -30,7 +33,7 @@ func main() {
 		Long:  "CometDump is a tool for syncing, serving, and querying CometBFT blockchain data.",
 	}
 
-	rootCmd.AddCommand(syncCmd(), serveCmd(), blockCmd())
+	rootCmd.AddCommand(syncCmd(), serveCmd(), blockCmd(), blockResultsCmd())
 
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -159,11 +162,6 @@ func serveCmd() *cobra.Command {
 			}
 
 			logger.Info("Starting RPC server", "address", "http://"+addr, "data_dir", dataDir)
-			logger.Info("Available endpoints:",
-				"block", "GET /block?height=N",
-				"block_results", "GET /block_results?height=N",
-				"blockchain", "GET /blockchain?minHeight=N&maxHeight=M",
-				"header", "GET /header?height=N")
 
 			// Handle interrupt signals
 			sigChan := make(chan os.Signal, 1)
@@ -198,6 +196,7 @@ func blockCmd() *cobra.Command {
 			dataDir, _ := cmd.Flags().GetString("data-dir")
 			height, _ := cmd.Flags().GetInt64("height")
 			verbose, _ := cmd.Flags().GetBool("verbose")
+			outputFormat, _ := cmd.Flags().GetString("output")
 
 			if height <= 0 {
 				fmt.Fprintf(os.Stderr, "Error: --height is required and must be greater than 0\n")
@@ -229,17 +228,120 @@ func blockCmd() *cobra.Command {
 			}
 
 			// Display block based on format
-			fmt.Printf("Block Height: %d\n", block.Block.Height)
-			fmt.Printf("Block Hash: %s\n", block.Block.Hash())
-			fmt.Printf("Time: %s\n", block.Block.Time.Format(time.RFC3339))
-			fmt.Printf("Proposer: %X\n", block.Block.ProposerAddress)
-			fmt.Printf("Transactions: %d\n", len(block.Block.Data.Txs))
+			if outputFormat == "json" {
+				bz, err := cometjson.Marshal(block.Block)
+				if err != nil {
+					logger.Error("Failed to marshal block to JSON", "error", err)
+					os.Exit(1)
+				}
+				fmt.Println(string(bz))
+			} else {
+				fmt.Printf("Block Height: %d\n", block.Block.Height)
+				fmt.Printf("Block Hash: %s\n", block.Block.Hash())
+				fmt.Printf("Time: %s\n", block.Block.Time.Format(time.RFC3339))
+				fmt.Printf("Proposer: %X\n", block.Block.ProposerAddress)
+				fmt.Printf("Transactions: %d\n", len(block.Block.Data.Txs))
+			}
 		},
 	}
 
 	cmd.Flags().String("data-dir", defaultDataDir, "Directory containing blockchain data")
 	cmd.Flags().Int64("height", 0, "Block height to retrieve (required)")
 	cmd.Flags().Bool("verbose", false, "Enable verbose logging")
+	cmd.Flags().String("output", "text", "Output format: text or json")
 
 	return cmd
+}
+
+func blockResultsCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "block-results",
+		Short: "Retrieve and display the block results of a specific height",
+		Run: func(cmd *cobra.Command, args []string) {
+			dataDir, _ := cmd.Flags().GetString("data-dir")
+			height, _ := cmd.Flags().GetInt64("height")
+			verbose, _ := cmd.Flags().GetBool("verbose")
+			outputFormat, _ := cmd.Flags().GetString("output")
+
+			if height <= 0 {
+				fmt.Fprintf(os.Stderr, "Error: --height is required and must be greater than 0\n")
+				cmd.Usage()
+				os.Exit(1)
+			}
+
+			logLevel := slog.LevelInfo
+			if verbose {
+				logLevel = slog.LevelDebug
+			}
+			logger := slog.New(tint.NewHandler(os.Stdout, &tint.Options{
+				Level:      logLevel,
+				TimeFormat: time.RFC3339,
+			}))
+
+			// Open store
+			store, err := cometdump.Open(dataDir)
+			if err != nil {
+				logger.Error("Failed to open store", "error", err)
+				os.Exit(1)
+			}
+
+			// Get block results
+			block, err := store.BlockAt(height)
+			if err != nil {
+				logger.Error("Failed to retrieve block results", "height", height, "error", err)
+				os.Exit(1)
+			}
+
+			// Display block results based on format
+			if outputFormat == "json" {
+				bz, err := cometjson.Marshal(block.ToResultBlockResults())
+				if err != nil {
+					logger.Error("Failed to marshal block results to JSON", "error", err)
+					os.Exit(1)
+				}
+				fmt.Println(string(bz))
+			} else {
+				fmt.Printf("Block Height: %d\n", height)
+				fmt.Println("Txs:")
+				if len(block.TxResults) == 0 {
+					fmt.Println("    No transactions")
+				}
+				for _, tx := range block.TxResults {
+					fmt.Printf("  - Code: %d\n", tx.Code)
+					fmt.Printf("    Data: %s\n", base64.StdEncoding.EncodeToString(tx.Data))
+					fmt.Printf("    GasWanted: %d\n", tx.GasWanted)
+					fmt.Printf("    GasUsed: %d\n", tx.GasUsed)
+					fmt.Println("    Events:")
+					printEvents("      ", tx.Events)
+				}
+				fmt.Println("FinalizeBlockEvents:")
+				printEvents("    ", block.FinalizeBlockEvents)
+			}
+		},
+	}
+
+	cmd.Flags().String("data-dir", defaultDataDir, "Directory containing blockchain data")
+	cmd.Flags().Int64("height", 0, "Block height to retrieve results for (required)")
+	cmd.Flags().Bool("verbose", false, "Enable verbose logging")
+	cmd.Flags().String("output", "text", "Output format: text or json")
+
+	return cmd
+}
+
+func printEvents(indent string, events []abcitypes.Event) {
+	if len(events) == 0 {
+		fmt.Printf("%sNo events\n", indent)
+		return
+	}
+	for _, event := range events {
+		fmt.Printf("%s- Type: %s\n", indent, event.Type)
+		for _, attr := range event.Attributes {
+			key, _ := base64.StdEncoding.DecodeString(attr.Key)
+			value, _ := base64.StdEncoding.DecodeString(attr.Value)
+			fmt.Printf("%s  - %s: %s\n", indent, key, value)
+		}
+		if len(event.Attributes) == 0 {
+			fmt.Printf("%s  - No attributes\n", indent)
+		}
+	}
 }
