@@ -136,6 +136,23 @@ The RPC server provides the following CometBFT-compatible endpoints:
 - `GET /blockchain?minHeight=N&maxHeight=M` - Get block headers in range
 - `GET /header?height=N` - Get block header at specific height
 
+## CLI Usage
+
+CometDump provides a powerful CLI tool for syncing, serving and accessing dump store.
+
+### CLI Example
+
+```bash
+# Sync blocks from a specific node up to height 100000
+cometdump sync --remote https://rpc.cosmos.network:443 --height 100000
+
+# Start RPC serve server on port 8080
+cometdump serve --addr 0.0.0.0:8080
+
+# Get block summary at height 12345
+cometdump block --height 12345
+```
+
 ## Requirements
 
 - Go 1.23.5 or later

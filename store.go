@@ -127,12 +127,39 @@ func (c SyncConfig) WithUseLatestVersion(useLatest bool) SyncConfig {
 	return c
 }
 
+// WithChunkSize sets the number of blocks to put in each file/chunk.
+func (c SyncConfig) WithChunkSize(size int) SyncConfig {
+	if size < 1 {
+		panic("chunk size must be a positive integer")
+	}
+	c.ChunkSize = size
+	return c
+}
+
 // WithHeight sets the height up to which blocks should be fetched.
 func (c SyncConfig) WithHeight(height int64) SyncConfig {
-	if height < 1 {
-		panic("height must be a positive integer")
+	if height < 0 {
+		panic("height must be a non-negative integer")
 	}
 	c.Height = height
+	return c
+}
+
+// WithFetchSize sets the number of blocks to fetch in each RPC call.
+func (c SyncConfig) WithFetchSize(size int) SyncConfig {
+	if size < 1 {
+		panic("fetch size must be a positive integer")
+	}
+	c.FetchSize = size
+	return c
+}
+
+// WithNumWorkers sets the number of concurrent workers to fetch blocks.
+func (c SyncConfig) WithNumWorkers(num int) SyncConfig {
+	if num < 1 {
+		panic("number of workers must be a positive integer")
+	}
+	c.NumWorkers = num
 	return c
 }
 
@@ -151,10 +178,17 @@ func (s *Store) Sync(ctx context.Context, conf SyncConfig) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	if conf.OutputChan != nil {
+		defer close(conf.OutputChan)
+	}
+
 	logger := conf.Logger
 
 	logger.Info("Discovering nodes", "remotes", conf.Remotes)
 	nodes, err := chainutil.DiscoverNodes(ctx, conf.Remotes, conf.ExpandRemotes, logger)
+	if ctx.Err() != nil {
+		return fmt.Errorf("sync canceled: %w", ctx.Err())
+	}
 	if err != nil {
 		return fmt.Errorf("failed to discover peers: %w", err)
 	}
@@ -197,7 +231,7 @@ func (s *Store) Sync(ctx context.Context, conf SyncConfig) error {
 	for currentHeight < targetHeight {
 		queuedBlocks := queueFetchJobs(int64(conf.ChunkSize), int64(conf.FetchSize),
 			currentHeight, targetHeight, jobQueue)
-		blocks, blockResults, err := collectFetchResults(jobQueue, resultsChan, queuedBlocks, logger)
+		blocks, blockResults, err := collectFetchResults(ctx, jobQueue, resultsChan, queuedBlocks, logger)
 		if err != nil {
 			return fmt.Errorf("failed to collect fetch results: %w", err)
 		}
@@ -208,10 +242,6 @@ func (s *Store) Sync(ctx context.Context, conf SyncConfig) error {
 			return fmt.Errorf("failed to store records: %w", err)
 		}
 		currentHeight += queuedBlocks
-	}
-
-	if conf.OutputChan != nil {
-		close(conf.OutputChan)
 	}
 
 	return nil
@@ -308,6 +338,7 @@ func queueFetchJobs(
 }
 
 func collectFetchResults(
+	ctx context.Context,
 	jobQueue chan<- *fetchJob,
 	resultsChan <-chan jobqueue.JobResult[fetchJob, fetchResult],
 	resultsLimit int64,
@@ -317,32 +348,36 @@ func collectFetchResults(
 	blockResults []*coretypes.ResultBlockResults,
 	err error,
 ) {
-	for jr := range resultsChan {
-		if jr.Err != nil {
-			switch e := jr.Err.(type) {
-			case *NoNodesAvailableError:
-				return nil, nil, e
-			case *fetchBlocksError:
-				logger.Warn("Failed to fetch blocks",
-					"range", fmt.Sprintf("%d-%d", jr.Job.startHeight, jr.Job.endHeight),
-					"retries", jr.Job.retries,
-					"error", e.err,
-					"remote", e.remote,
-				)
-				jr.Job.retries++
-				jobQueue <- jr.Job // Requeue the job for retry
-				continue
+	for {
+		select {
+		case jr := <-resultsChan:
+			// Job queue closed, no more jobs to process
+			if jr.Err != nil {
+				switch e := jr.Err.(type) {
+				case *NoNodesAvailableError:
+					return nil, nil, e
+				case *fetchBlocksError:
+					logger.Warn("Failed to fetch blocks",
+						"range", fmt.Sprintf("%d-%d", jr.Job.startHeight, jr.Job.endHeight),
+						"retries", jr.Job.retries,
+						"error", e.err,
+						"remote", e.remote,
+					)
+					jr.Job.retries++
+					jobQueue <- jr.Job // Requeue the job for retry
+					continue
+				}
 			}
-		}
-		blocks = append(blocks, jr.Result.blocks...)
-		blockResults = append(blockResults, jr.Result.blockResults...)
+			blocks = append(blocks, jr.Result.blocks...)
+			blockResults = append(blockResults, jr.Result.blockResults...)
 
-		if len(blocks) >= int(resultsLimit) {
-			break
+			if len(blocks) >= int(resultsLimit) {
+				return blocks, blockResults, nil
+			}
+		case <-ctx.Done():
+			return nil, nil, fmt.Errorf("sync cancelled: %w", ctx.Err())
 		}
 	}
-
-	return blocks, blockResults, nil
 }
 
 func blockRecordsFromRPCResults(

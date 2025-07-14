@@ -2,6 +2,7 @@ package chainutil
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -134,12 +135,20 @@ func discoverNode(
 
 	abciInfo, err := rpc.ABCIInfo(ctx)
 	if err != nil {
+		if errors.Is(ctx.Err(), context.Canceled) {
+			return
+		}
+
 		logger.Warn("Skipping node", "remote", remote, "error", fmt.Errorf("failed to get ABCI info: %w", err))
 		return
 	}
 
 	status, err := rpc.Status(ctx)
 	if err != nil {
+		if errors.Is(ctx.Err(), context.Canceled) {
+			return
+		}
+
 		logger.Warn("Skipping node", "remote", remote, "error", fmt.Errorf("failed to get status: %w", err))
 		return
 	}

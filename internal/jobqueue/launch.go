@@ -20,8 +20,8 @@ type JobResult[J, R any] struct {
 // receive jobs from the job queue and sends the result to results channel.
 func Launch[J, R any](
 	ctx context.Context,
-	queueSize int,
 	workersCount int,
+	queueSize int,
 	f DoFunc[J, R],
 ) (
 	jobQueue chan *J,
