@@ -50,12 +50,8 @@ func (server *RPCServer) BlockchainInfo(_ *rpctypes.Context, minHeight, maxHeigh
 		return nil, err
 	}
 
-	iter, err := server.store.Blocks(minHeight, maxHeight)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get blocks in range %d-%d: %w", minHeight, maxHeight, err)
-	}
 	var metas []*cmtypes.BlockMeta
-	for br, err := range iter {
+	for br, err := range server.store.Blocks(minHeight, maxHeight) {
 		if err != nil {
 			return nil, fmt.Errorf("failed to iterate blocks in range %d-%d: %w", minHeight, maxHeight, err)
 		}

@@ -501,7 +501,7 @@ func (s *Store) insertChunk(chk chunk) {
 // It accepts optional start and end heights to limit the range of blocks returned.
 // If no heights are provided, it defaults to the entire range of stored blocks.
 // The iterator yields BlockRecord objects and any errors encountered during iteration.
-func (s *Store) Blocks(args ...int64) (iter.Seq2[*BlockRecord, error], error) {
+func (s *Store) Blocks(args ...int64) iter.Seq2[*BlockRecord, error] {
 	startHeight := int64(1)
 	if len(args) > 0 {
 		startHeight = args[0]
@@ -511,7 +511,7 @@ func (s *Store) Blocks(args ...int64) (iter.Seq2[*BlockRecord, error], error) {
 		endHeight = args[1]
 	}
 	if startHeight < 1 || endHeight < 1 || startHeight > endHeight {
-		return nil, fmt.Errorf("invalid height range: %d-%d", startHeight, endHeight)
+		panic(fmt.Errorf("invalid height range: %d-%d", startHeight, endHeight))
 	}
 
 	return func(yield func(*BlockRecord, error) bool) {
@@ -547,7 +547,7 @@ func (s *Store) Blocks(args ...int64) (iter.Seq2[*BlockRecord, error], error) {
 				}
 			}
 		}
-	}, nil
+	}
 }
 
 func (s *Store) iterChunk(chk chunk, skip int) (iter.Seq2[*BlockRecord, error], error) {
