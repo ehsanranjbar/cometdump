@@ -18,6 +18,7 @@ import (
 	"github.com/ehsanranjbar/cometdump"
 	"github.com/lmittmann/tint"
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 )
 
 const (
@@ -54,16 +55,8 @@ func syncCmd() *cobra.Command {
 			useLatestVersion, _ := cmd.Flags().GetBool("use-latest-version")
 			chunkSize, _ := cmd.Flags().GetInt("chunk-size")
 			numWorkers, _ := cmd.Flags().GetInt("workers")
-			verbose, _ := cmd.Flags().GetBool("verbose")
 
-			logLevel := slog.LevelInfo
-			if verbose {
-				logLevel = slog.LevelDebug
-			}
-			logger := slog.New(tint.NewHandler(os.Stdout, &tint.Options{
-				Level:      logLevel,
-				TimeFormat: time.RFC3339,
-			}))
+			logger := getLogger(cmd.Flags())
 
 			// Open store
 			store, err := cometdump.Open(dataDir)
@@ -75,7 +68,7 @@ func syncCmd() *cobra.Command {
 			// Configure sync
 			config := cometdump.DefaultSyncConfig(remote).
 				WithChunkSize(chunkSize).
-				WithHeight(height).
+				WithTargetHeight(height).
 				WithFetchSize(fetchSize).
 				WithNumWorkers(numWorkers).
 				WithExpandRemotes(expandRemotes).
@@ -123,6 +116,18 @@ func syncCmd() *cobra.Command {
 	return cmd
 }
 
+func getLogger(flags *pflag.FlagSet) *slog.Logger {
+	verbose, _ := flags.GetBool("verbose")
+	logLevel := slog.LevelInfo
+	if verbose {
+		logLevel = slog.LevelDebug
+	}
+	return slog.New(tint.NewHandler(os.Stdout, &tint.Options{
+		Level:      logLevel,
+		TimeFormat: time.RFC3339,
+	}))
+}
+
 func serveCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "serve",
@@ -130,16 +135,8 @@ func serveCmd() *cobra.Command {
 		Run: func(cmd *cobra.Command, args []string) {
 			dataDir, _ := cmd.Flags().GetString("data-dir")
 			addr, _ := cmd.Flags().GetString("addr")
-			verbose, _ := cmd.Flags().GetBool("verbose")
 
-			logLevel := slog.LevelInfo
-			if verbose {
-				logLevel = slog.LevelDebug
-			}
-			logger := slog.New(tint.NewHandler(os.Stdout, &tint.Options{
-				Level:      logLevel,
-				TimeFormat: time.RFC3339,
-			}))
+			logger := getLogger(cmd.Flags())
 
 			// Open store
 			store, err := cometdump.Open(dataDir)
@@ -195,7 +192,6 @@ func blockCmd() *cobra.Command {
 		Run: func(cmd *cobra.Command, args []string) {
 			dataDir, _ := cmd.Flags().GetString("data-dir")
 			height, _ := cmd.Flags().GetInt64("height")
-			verbose, _ := cmd.Flags().GetBool("verbose")
 			outputFormat, _ := cmd.Flags().GetString("output")
 
 			if height <= 0 {
@@ -204,14 +200,7 @@ func blockCmd() *cobra.Command {
 				os.Exit(1)
 			}
 
-			logLevel := slog.LevelInfo
-			if verbose {
-				logLevel = slog.LevelDebug
-			}
-			logger := slog.New(tint.NewHandler(os.Stdout, &tint.Options{
-				Level:      logLevel,
-				TimeFormat: time.RFC3339,
-			}))
+			logger := getLogger(cmd.Flags())
 
 			// Open store
 			store, err := cometdump.Open(dataDir)
@@ -260,7 +249,6 @@ func blockResultsCmd() *cobra.Command {
 		Run: func(cmd *cobra.Command, args []string) {
 			dataDir, _ := cmd.Flags().GetString("data-dir")
 			height, _ := cmd.Flags().GetInt64("height")
-			verbose, _ := cmd.Flags().GetBool("verbose")
 			outputFormat, _ := cmd.Flags().GetString("output")
 
 			if height <= 0 {
@@ -269,14 +257,7 @@ func blockResultsCmd() *cobra.Command {
 				os.Exit(1)
 			}
 
-			logLevel := slog.LevelInfo
-			if verbose {
-				logLevel = slog.LevelDebug
-			}
-			logger := slog.New(tint.NewHandler(os.Stdout, &tint.Options{
-				Level:      logLevel,
-				TimeFormat: time.RFC3339,
-			}))
+			logger := getLogger(cmd.Flags())
 
 			// Open store
 			store, err := cometdump.Open(dataDir)
