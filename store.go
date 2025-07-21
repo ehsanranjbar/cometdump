@@ -68,15 +68,15 @@ type SyncConfig struct {
 	UseLatestVersion bool
 	// ChunkSize is the number of blocks to put in each file/chunk.
 	ChunkSize int
-	// Height is the height up to which store should be synced.
+	// TargetHeight is the height up to which store should be synced.
 	// If 0, it will fetch up to the latest block height.
-	Height int64
+	TargetHeight int64
 	// FetchSize is the number of blocks to fetch in each RPC call.
 	FetchSize int
 	// NumWorkers is the number of concurrent workers to fetch blocks.
 	NumWorkers int
 	// OutputChan is a channel that can be optionally used to receive the BlockRecords as they are stored.
-	OutputChan chan *BlockRecord
+	OutputChan chan<- *BlockRecord
 	// Logger is the logger to use for logging during the sync process.
 	Logger *slog.Logger
 }
@@ -92,7 +92,7 @@ func DefaultSyncConfig(remotes ...string) SyncConfig {
 		ExpandRemotes:    len(remotes) < 2,
 		UseLatestVersion: true,
 		ChunkSize:        10000,
-		Height:           0,
+		TargetHeight:     0,
 		FetchSize:        100,
 		NumWorkers:       4,
 		Logger: slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
@@ -136,12 +136,12 @@ func (c SyncConfig) WithChunkSize(size int) SyncConfig {
 	return c
 }
 
-// WithHeight sets the height up to which blocks should be fetched.
-func (c SyncConfig) WithHeight(height int64) SyncConfig {
+// WithTargetHeight sets the height up to which blocks should be fetched.
+func (c SyncConfig) WithTargetHeight(height int64) SyncConfig {
 	if height < 0 {
 		panic("height must be a non-negative integer")
 	}
-	c.Height = height
+	c.TargetHeight = height
 	return c
 }
 
@@ -160,6 +160,14 @@ func (c SyncConfig) WithNumWorkers(num int) SyncConfig {
 		panic("number of workers must be a positive integer")
 	}
 	c.NumWorkers = num
+	return c
+}
+
+// WithOutputChan sets the channel to which BlockRecords will be sent as they are stored.
+// If nil, no records will be sent to a channel.
+// The channel will be closed automatically after the sync operation is complete.
+func (c SyncConfig) WithOutputChan(outputChan chan<- *BlockRecord) SyncConfig {
+	c.OutputChan = outputChan
 	return c
 }
 
@@ -203,7 +211,7 @@ func (s *Store) Sync(ctx context.Context, conf SyncConfig) error {
 		return fmt.Errorf("no functional remotes available after discovery and filtering")
 	}
 
-	targetHeight := conf.Height
+	targetHeight := conf.TargetHeight
 	if targetHeight < 1 {
 		targetHeight = nodes.LatestAvailableHeight()
 	}
@@ -262,18 +270,18 @@ type fetchResult struct {
 	blockResults []*coretypes.ResultBlockResults
 }
 
-// NoNodesAvailableError is returned when no nodes are available for the given height range.
-type NoNodesAvailableError struct {
+// NoNodesAvailableForRangeError is returned when no nodes are available for the given height range.
+type NoNodesAvailableForRangeError struct {
 	startHeight int64
 	endHeight   int64
 }
 
 // Range returns the height range for which no nodes are available.
-func (e *NoNodesAvailableError) Range() (int64, int64) {
+func (e *NoNodesAvailableForRangeError) Range() (int64, int64) {
 	return e.startHeight, e.endHeight
 }
 
-func (e *NoNodesAvailableError) Error() string {
+func (e *NoNodesAvailableForRangeError) Error() string {
 	return fmt.Sprintf("no nodes available for height range %d-%d", e.startHeight, e.endHeight)
 }
 
@@ -291,7 +299,7 @@ func doFetch(nodes chainutil.Nodes) jobqueue.DoFunc[fetchJob, fetchResult] {
 	return func(ctx context.Context, job *fetchJob) (*fetchResult, error) {
 		nodes := nodes.ByHeightRange(job.startHeight, job.endHeight)
 		if len(nodes) == 0 {
-			return nil, &NoNodesAvailableError{
+			return nil, &NoNodesAvailableForRangeError{
 				startHeight: job.startHeight,
 				endHeight:   job.endHeight,
 			}
@@ -354,7 +362,7 @@ func collectFetchResults(
 			// Job queue closed, no more jobs to process
 			if jr.Err != nil {
 				switch e := jr.Err.(type) {
-				case *NoNodesAvailableError:
+				case *NoNodesAvailableForRangeError:
 					return nil, nil, e
 				case *fetchBlocksError:
 					logger.Warn("Failed to fetch blocks",
@@ -489,14 +497,41 @@ func (s *Store) insertChunk(chk chunk) {
 	s.chunks = slices.Insert(s.chunks, idx, chk)
 }
 
-// Blocks returns an iterator which iterates over all BlockRecords in the store with order
-func (s *Store) Blocks() iter.Seq2[*BlockRecord, error] {
+// Blocks returns an iterator over block records in the store.
+// It accepts optional start and end heights to limit the range of blocks returned.
+// If no heights are provided, it defaults to the entire range of stored blocks.
+// The iterator yields BlockRecord objects and any errors encountered during iteration.
+func (s *Store) Blocks(args ...int64) (iter.Seq2[*BlockRecord, error], error) {
+	startHeight := int64(1)
+	if len(args) > 0 {
+		startHeight = args[0]
+	}
+	endHeight := s.lastStoredHeight()
+	if len(args) > 1 {
+		endHeight = args[1]
+	}
+	if startHeight < 1 || endHeight < 1 || startHeight > endHeight {
+		return nil, fmt.Errorf("invalid height range: %d-%d", startHeight, endHeight)
+	}
+
 	return func(yield func(*BlockRecord, error) bool) {
 		s.mu.RLock()
 		defer s.mu.RUnlock()
 
 		for _, chk := range s.chunks {
-			iter, err := s.iterChunk(chk, 0)
+			if chk.toHeight < startHeight {
+				continue
+			}
+			if chk.fromHeight > endHeight {
+				return
+			}
+
+			skip := 0
+			if chk.fromHeight < startHeight && chk.toHeight >= startHeight {
+				skip = int(startHeight - chk.fromHeight)
+			}
+
+			iter, err := s.iterChunk(chk, skip)
 			if err != nil {
 				err = fmt.Errorf("failed to iterate chunk %s: %w", chk.filename(), err)
 				yield(nil, err)
@@ -507,12 +542,12 @@ func (s *Store) Blocks() iter.Seq2[*BlockRecord, error] {
 				if err != nil {
 					err = fmt.Errorf("failed to read record from chunk %s: %w", chk.filename(), err)
 				}
-				if !yield(rec, err) {
+				if rec.Block.Height > endHeight || !yield(rec, err) {
 					return
 				}
 			}
 		}
-	}
+	}, nil
 }
 
 func (s *Store) iterChunk(chk chunk, skip int) (iter.Seq2[*BlockRecord, error], error) {
@@ -588,45 +623,4 @@ func (s *Store) BlockAt(height int64) (*BlockRecord, error) {
 	}
 
 	return nil, fmt.Errorf("block at height %d not found", height)
-}
-
-// BlocksInRange returns a list of BlockRecords in the specified height range.
-func (s *Store) BlocksInRange(startHeight, endHeight int64) ([]*BlockRecord, error) {
-	if startHeight < 1 || endHeight < 1 || startHeight > endHeight {
-		return nil, fmt.Errorf("invalid height range: %d-%d", startHeight, endHeight)
-	}
-
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	var records []*BlockRecord
-	for _, chk := range s.chunks {
-		if chk.toHeight < startHeight {
-			continue
-		}
-		if chk.fromHeight > endHeight {
-			break
-		}
-
-		skip := 0
-		if chk.fromHeight < startHeight && chk.toHeight >= startHeight {
-			skip = int(startHeight - chk.fromHeight)
-		}
-		iter, err := s.iterChunk(chk, skip)
-		if err != nil {
-			return nil, fmt.Errorf("failed to iterate chunk %s: %w", chk.filename(), err)
-		}
-
-		for rec, err := range iter {
-			if err != nil {
-				return nil, fmt.Errorf("failed to read record from chunk %s: %w", chk.filename(), err)
-			}
-			if rec.Block.Height > endHeight {
-				break // No need to continue if we've passed the end height
-			}
-			records = append(records, rec)
-		}
-	}
-
-	return records, nil
 }
