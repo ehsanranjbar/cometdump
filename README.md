@@ -53,7 +53,7 @@ func main() {
     config := cometdump.DefaultSyncConfig("https://cosmos-rpc.publicnode.com:443/").
         WithExpandRemotes(true).                    // Discover additional nodes
         WithUseLatestVersion(true).                 // Use nodes with latest version
-        WithHeight(1000).                           // Sync up to block 1,000
+        WithTargetHeight(1000).                     // Sync up to block 1,000
         WithLogger(logger.With("module", "sync"))
 
     ctx := context.Background()
@@ -66,7 +66,7 @@ func main() {
 
     // Iterate through all stored blocks using the Blocks method
     fmt.Println("\nIterating through blocks:")
-    for block, err := range store.Blocks() {
+    for block, err := range store.Blocks(1, 10) {
         if err != nil {
             log.Printf("Error reading block: %v", err)
             continue
@@ -76,11 +76,6 @@ func main() {
             block.Block.Height,
             block.Block.Hash(),
             len(block.Block.Data.Txs))
-
-        // Process first 10 blocks only for this example
-        if block.Block.Height >= 10 {
-            break
-        }
     }
 }
 ```
