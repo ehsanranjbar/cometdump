@@ -24,40 +24,103 @@ type Store struct {
 	mu     sync.RWMutex
 	dir    string
 	chunks chunks
+	logger *slog.Logger
+}
+
+// OpenOptions defines options for opening a store.
+type OpenOptions struct {
+	// Path to the store directory.
+	Path string
+	// Optional S3 compatible storage URL to fetch chunks from.
+	S3RemoteURL string
+	// ChecksumsFile is the path to a file containing checksums of the chunks.
+	ChecksumsFile string
+	// VerifyChecksums indicates whether to verify checksums of the chunks.
+	VerifyChecksums bool
+	// Logger is the logger to use for logging during store operations.
+	Logger *slog.Logger
+}
+
+// DefaultOpenOptions provides default options for opening a store.
+func DefaultOpenOptions(path string) OpenOptions {
+	return OpenOptions{
+		Path:            path,
+		S3RemoteURL:     "",
+		ChecksumsFile:   "",
+		VerifyChecksums: false,
+		Logger: slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
+			Level: slog.LevelWarn,
+		})),
+	}
+}
+
+// WithS3RemoteURL sets the S3 compatible storage URL to fetch chunks from.
+func (o OpenOptions) WithS3RemoteURL(url string) OpenOptions {
+	o.S3RemoteURL = url
+	return o
+}
+
+// WithChecksumsFile sets the path to a file containing checksums of the chunks.
+func (o OpenOptions) WithChecksumsFile(file string) OpenOptions {
+	o.ChecksumsFile = file
+	return o
+}
+
+// WithVerifyChecksums sets whether to verify checksums of the chunks.
+func (o OpenOptions) WithVerifyChecksums(verify bool) OpenOptions {
+	o.VerifyChecksums = verify
+	return o
+}
+
+// WithLogger sets the logger for the store operations.
+func (o OpenOptions) WithLogger(logger *slog.Logger) OpenOptions {
+	if logger == nil {
+		panic("logger cannot be nil")
+	}
+	o.Logger = logger
+	return o
 }
 
 // Open initializes a new Store at the specified path
 // or returns an existing one. If the directory does not exist, it will be created.
 // It also acquires a lock on the directory to prevent concurrent access.
-func Open(path string) (*Store, error) {
-	stat, err := os.Stat(path)
+func Open(opts OpenOptions) (*Store, error) {
+	logger := opts.Logger
+
+	stat, err := os.Stat(opts.Path)
 	if errors.Is(err, os.ErrNotExist) {
-		err := os.MkdirAll(path, 0755)
+		err := os.MkdirAll(opts.Path, 0755)
 		if err != nil {
-			return nil, fmt.Errorf("failed to create directory %s: %w", path, err)
+			return nil, fmt.Errorf("failed to create directory %s: %w", opts.Path, err)
 		}
 	} else if err != nil {
 		return nil, err
 	} else {
 		if !stat.IsDir() {
-			return nil, fmt.Errorf("path %s is not a directory", path)
+			return nil, fmt.Errorf("path %s is not a directory", opts.Path)
 		}
 	}
 
-	chunks, err := readChunksList(path)
+	chunks, err := readChunksList(opts.Path, logger)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get chunks list: %w", err)
 	}
 
+	logger.Info("Opened store",
+		"path", opts.Path,
+		"height_range", fmt.Sprintf("%d-%d", chunks.startHeight(), chunks.endHeight()),
+		"chunks_count", len(chunks))
+
 	s := &Store{
-		dir:    path,
+		dir:    opts.Path,
 		chunks: chunks,
+		logger: logger,
 	}
 	return s, nil
 }
 
-// SyncConfig defines config for the Sync method.
-type SyncConfig struct {
+// SyncOptions defines options for the Sync method.
+type SyncOptions struct {
 	// Remotes is a list of node RPC endpoints to connect to.
 	Remotes []string
 	// ExpandRemotes indicates whether to expand the remotes by querying the chain network info.
@@ -81,13 +144,13 @@ type SyncConfig struct {
 	Logger *slog.Logger
 }
 
-// DefaultSyncConfig provides default options for the Sync method.
-func DefaultSyncConfig(remotes ...string) SyncConfig {
+// DefaultSyncOptions provides default options for the Sync method.
+func DefaultSyncOptions(remotes ...string) SyncOptions {
 	if len(remotes) == 0 {
 		panic("at least one remote must be provided")
 	}
 
-	return SyncConfig{
+	return SyncOptions{
 		Remotes:          remotes,
 		ExpandRemotes:    len(remotes) < 2,
 		UseLatestVersion: true,
@@ -96,114 +159,114 @@ func DefaultSyncConfig(remotes ...string) SyncConfig {
 		FetchSize:        100,
 		NumWorkers:       4,
 		Logger: slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
-			Level: slog.LevelDebug,
+			Level: slog.LevelWarn,
 		})),
 	}
 }
 
 // WithExpandRemotes sets whether to expand the remotes by querying the chain network info.
-func (c SyncConfig) WithExpandRemotes(expand bool) SyncConfig {
-	c.ExpandRemotes = expand
-	return c
+func (opts SyncOptions) WithExpandRemotes(expand bool) SyncOptions {
+	opts.ExpandRemotes = expand
+	return opts
 }
 
 // WithVersionConstraint sets a version constraint for the remotes.
-func (c SyncConfig) WithVersionConstraint(constraint string) SyncConfig {
+func (opts SyncOptions) WithVersionConstraint(constraint string) SyncOptions {
 	if constraint == "" {
-		c.VersionConstraint = nil
-		return c
+		opts.VersionConstraint = nil
+		return opts
 	}
 	constraints, err := semver.NewConstraint(constraint)
 	if err != nil {
 		panic(fmt.Sprintf("invalid version constraint: %s", constraint))
 	}
-	c.VersionConstraint = constraints
-	return c
+	opts.VersionConstraint = constraints
+	return opts
 }
 
 // WithUseLatestVersion indicates whether to use the latest version of the remote.
-func (c SyncConfig) WithUseLatestVersion(useLatest bool) SyncConfig {
-	c.UseLatestVersion = useLatest
-	return c
+func (opts SyncOptions) WithUseLatestVersion(useLatest bool) SyncOptions {
+	opts.UseLatestVersion = useLatest
+	return opts
 }
 
 // WithChunkSize sets the number of blocks to put in each file/chunk.
-func (c SyncConfig) WithChunkSize(size int) SyncConfig {
+func (opts SyncOptions) WithChunkSize(size int) SyncOptions {
 	if size < 1 {
 		panic("chunk size must be a positive integer")
 	}
-	c.ChunkSize = size
-	return c
+	opts.ChunkSize = size
+	return opts
 }
 
 // WithTargetHeight sets the height up to which blocks should be fetched.
-func (c SyncConfig) WithTargetHeight(height int64) SyncConfig {
+func (opts SyncOptions) WithTargetHeight(height int64) SyncOptions {
 	if height < 0 {
 		panic("height must be a non-negative integer")
 	}
-	c.TargetHeight = height
-	return c
+	opts.TargetHeight = height
+	return opts
 }
 
 // WithFetchSize sets the number of blocks to fetch in each RPC call.
-func (c SyncConfig) WithFetchSize(size int) SyncConfig {
+func (opts SyncOptions) WithFetchSize(size int) SyncOptions {
 	if size < 1 {
 		panic("fetch size must be a positive integer")
 	}
-	c.FetchSize = size
-	return c
+	opts.FetchSize = size
+	return opts
 }
 
 // WithNumWorkers sets the number of concurrent workers to fetch blocks.
-func (c SyncConfig) WithNumWorkers(num int) SyncConfig {
+func (opts SyncOptions) WithNumWorkers(num int) SyncOptions {
 	if num < 1 {
 		panic("number of workers must be a positive integer")
 	}
-	c.NumWorkers = num
-	return c
+	opts.NumWorkers = num
+	return opts
 }
 
 // WithOutputChan sets the channel to which BlockRecords will be sent as they are stored.
 // If nil, no records will be sent to a channel.
 // The channel will be closed automatically after the sync operation is complete.
-func (c SyncConfig) WithOutputChan(outputChan chan<- *BlockRecord) SyncConfig {
-	c.OutputChan = outputChan
-	return c
+func (opts SyncOptions) WithOutputChan(outputChan chan<- *BlockRecord) SyncOptions {
+	opts.OutputChan = outputChan
+	return opts
 }
 
 // WithLogger sets the logger for the sync operation.
-func (conf SyncConfig) WithLogger(logger *slog.Logger) SyncConfig {
+func (opts SyncOptions) WithLogger(logger *slog.Logger) SyncOptions {
 	if logger == nil {
 		panic("logger cannot be nil")
 	}
-	conf.Logger = logger
-	return conf
+	opts.Logger = logger
+	return opts
 }
 
 // Sync fetches blocks up until the latest block height (or a specific height if provided)
 // and stores them in the store directory.
-func (s *Store) Sync(ctx context.Context, conf SyncConfig) error {
+func (s *Store) Sync(ctx context.Context, opts SyncOptions) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if conf.OutputChan != nil {
-		defer close(conf.OutputChan)
+	if opts.OutputChan != nil {
+		defer close(opts.OutputChan)
 	}
 
-	logger := conf.Logger
+	logger := opts.Logger
 
-	logger.Info("Discovering nodes", "remotes", conf.Remotes)
-	nodes, err := chainutil.DiscoverNodes(ctx, conf.Remotes, conf.ExpandRemotes, logger)
+	logger.Info("Discovering nodes", "remotes", opts.Remotes)
+	nodes, err := chainutil.DiscoverNodes(ctx, opts.Remotes, opts.ExpandRemotes, logger)
 	if ctx.Err() != nil {
 		return fmt.Errorf("sync canceled: %w", ctx.Err())
 	}
 	if err != nil {
 		return fmt.Errorf("failed to discover peers: %w", err)
 	}
-	if conf.VersionConstraint != nil {
-		nodes = nodes.ConstrainByVersion(*conf.VersionConstraint)
+	if opts.VersionConstraint != nil {
+		nodes = nodes.ConstrainByVersion(*opts.VersionConstraint)
 	}
-	if conf.UseLatestVersion {
+	if opts.UseLatestVersion {
 		nodes = nodes.LatestVersion()
 	}
 	logger.Info("Functional remotes", "count", len(nodes))
@@ -211,7 +274,7 @@ func (s *Store) Sync(ctx context.Context, conf SyncConfig) error {
 		return fmt.Errorf("no functional remotes available after discovery and filtering")
 	}
 
-	targetHeight := conf.TargetHeight
+	targetHeight := opts.TargetHeight
 	if targetHeight < 1 {
 		targetHeight = nodes.LatestAvailableHeight()
 	}
@@ -224,12 +287,12 @@ func (s *Store) Sync(ctx context.Context, conf SyncConfig) error {
 		return nil
 	}
 
-	queueSize := conf.ChunkSize/conf.FetchSize + 1
+	queueSize := opts.ChunkSize/opts.FetchSize + 1
 	logger.Info("Spawning fetch workers",
-		"num_workers", conf.NumWorkers, "queue_size", queueSize)
+		"num_workers", opts.NumWorkers, "queue_size", queueSize)
 	jobQueue, resultsChan, cleanup := jobqueue.Launch(
 		ctx,
-		conf.NumWorkers,
+		opts.NumWorkers,
 		queueSize,
 		doFetch(nodes))
 	defer cleanup()
@@ -237,18 +300,22 @@ func (s *Store) Sync(ctx context.Context, conf SyncConfig) error {
 	currentHeight := lastStoredHeight + 1
 	logger.Info("Syncing store", "from", currentHeight, "to", targetHeight)
 	for currentHeight < targetHeight {
-		queuedBlocks := queueFetchJobs(int64(conf.ChunkSize), int64(conf.FetchSize),
+		queuedBlocks := queueFetchJobs(int64(opts.ChunkSize), int64(opts.FetchSize),
 			currentHeight, targetHeight, jobQueue)
 		blocks, blockResults, err := collectFetchResults(ctx, jobQueue, resultsChan, queuedBlocks, logger)
 		if err != nil {
 			return fmt.Errorf("failed to collect fetch results: %w", err)
 		}
 		records := blockRecordsFromRPCResults(blocks, blockResults)
-		pushToChannel(records, conf.OutputChan)
-		err = s.storeRecords(records, logger)
+		pushToChannel(records, opts.OutputChan)
+		chk, err := s.storeRecords(records)
 		if err != nil {
 			return fmt.Errorf("failed to store records: %w", err)
 		}
+		s.insertChunk(chk)
+		s.logger.Info("Stored chunk", "filename", chk.filename(),
+			"height_range", fmt.Sprintf("%d-%d", chk.fromHeight, chk.toHeight))
+
 		currentHeight += queuedBlocks
 	}
 
@@ -366,7 +433,7 @@ func collectFetchResults(
 					return nil, nil, e
 				case *fetchBlocksError:
 					logger.Warn("Failed to fetch blocks",
-						"range", fmt.Sprintf("%d-%d", jr.Job.startHeight, jr.Job.endHeight),
+						"height_range", fmt.Sprintf("%d-%d", jr.Job.startHeight, jr.Job.endHeight),
 						"retries", jr.Job.retries,
 						"error", e.err,
 						"remote", e.remote,
@@ -437,12 +504,12 @@ func pushToChannel[T any](records []T, outputChan chan<- T) {
 	}
 }
 
-func (s *Store) storeRecords(recs []*BlockRecord, logger *slog.Logger) error {
+func (s *Store) storeRecords(recs []*BlockRecord) (chunk, error) {
 	startHeight := recs[0].Block.Height
 	endHeight := recs[len(recs)-1].Block.Height
 	file, err := s.createChunkFile(startHeight, endHeight)
 	if err != nil {
-		return fmt.Errorf("failed to create chunk file: %w", err)
+		return chunk{}, fmt.Errorf("failed to create chunk file: %w", err)
 	}
 	defer file.Close()
 
@@ -455,24 +522,20 @@ func (s *Store) storeRecords(recs []*BlockRecord, logger *slog.Logger) error {
 	enc.EncodeArrayLen(len(recs)) // Each block and its results
 	for _, rec := range recs {
 		if err := enc.Encode(rec); err != nil {
-			return fmt.Errorf("failed to encode BlockRecord: %w", err)
+			return chunk{}, fmt.Errorf("failed to encode BlockRecord: %w", err)
 		}
 	}
 	err = wr.Flush()
 	if err != nil {
-		return fmt.Errorf("failed to flush brotli writer: %w", err)
+		return chunk{}, fmt.Errorf("failed to flush brotli writer: %w", err)
 	}
 	err = wr.Close()
 	if err != nil {
-		return fmt.Errorf("failed to close brotli writer: %w", err)
+		return chunk{}, fmt.Errorf("failed to close brotli writer: %w", err)
 	}
 
 	chk := newChunk(startHeight, endHeight)
-	s.insertChunk(chk)
-
-	logger.Info("Stored chunk", "filename", chk.filename())
-
-	return nil
+	return chk, nil
 }
 
 func (s *Store) createChunkFile(startHeight, endHeight int64) (*os.File, error) {
@@ -486,14 +549,7 @@ func (s *Store) createChunkFile(startHeight, endHeight int64) (*os.File, error) 
 }
 
 func (s *Store) insertChunk(chk chunk) {
-	idx, _ := slices.BinarySearchFunc(s.chunks, chk, func(e, t chunk) int {
-		if e.fromHeight < t.fromHeight {
-			return -1
-		} else if e.fromHeight > t.fromHeight {
-			return 1
-		}
-		return 0
-	})
+	idx, _ := slices.BinarySearchFunc(s.chunks, chk, chunksCmpFunc)
 	s.chunks = slices.Insert(s.chunks, idx, chk)
 }
 
@@ -623,4 +679,108 @@ func (s *Store) BlockAt(height int64) (*BlockRecord, error) {
 	}
 
 	return nil, fmt.Errorf("block at height %d not found", height)
+}
+
+// Normalize normalizes the chunks into a new chunks list of specified size.
+func (s *Store) Normalize(chunkSize int64) error {
+	if chunkSize < 1 {
+		return fmt.Errorf("chunk size must be a positive integer, got %d", chunkSize)
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if len(s.chunks) == 0 {
+		return nil // Nothing to normalize
+	}
+
+	buf := make([]*BlockRecord, 0, chunkSize)
+	newChunks := make(chunks, 0, (s.chunks.endHeight()-s.chunks.startHeight()+1)/int64(chunkSize))
+	removalList := make([]chunk, 0)
+	for i, chk := range s.chunks {
+		// Skip chunks that are either exactly of the specified size or the last chunk that is smaller than the size.
+		if len(buf) == 0 && (chk.length() == chunkSize || (i == len(s.chunks)-1 && chk.length() <= chunkSize)) {
+			newChunks = append(newChunks, chk)
+			continue
+		}
+
+		iter, err := s.iterChunk(chk, 0)
+		if err != nil {
+			return fmt.Errorf("failed to iterate chunk %s: %w", chk.filename(), err)
+		}
+		for rec, err := range iter {
+			if err != nil {
+				return fmt.Errorf("failed to read record from chunk %s: %w", chk.filename(), err)
+			}
+			buf = append(buf, rec)
+			if len(buf) == int(chunkSize) {
+				newChunk, err := s.storeRecords(buf)
+				if err != nil {
+					return fmt.Errorf("failed to store records for chunk %s: %w", chk.filename(), err)
+				}
+				newChunks = append(newChunks, newChunk)
+				s.logger.Info("Stored chunk", "filename", newChunk.filename(),
+					"height_range", fmt.Sprintf("%d-%d", newChunk.fromHeight, newChunk.toHeight))
+				buf = buf[:0] // Reset buffer after storing
+
+				err = s.dropChunks(removalList...)
+				if err != nil {
+					s.logger.Error("Failed to drop old chunks", "error", err)
+				}
+				removalList = removalList[:0] // Reset removal list after dropping
+			}
+		}
+
+		removalList = append(removalList, chk) // Mark chunk for removal
+	}
+
+	if len(buf) > 0 {
+		// Store any remaining records that didn't fill a complete chunk
+		newChunk, err := s.storeRecords(buf)
+		if err != nil {
+			return fmt.Errorf("failed to store remaining records: %w", err)
+		}
+		newChunks = append(newChunks, newChunk)
+		s.logger.Info("Stored chunk", "filename", newChunk.filename(),
+			"height_range", fmt.Sprintf("%d-%d", newChunk.fromHeight, newChunk.toHeight))
+	}
+
+	// Drop remaining marked chunks
+	err := s.dropChunks(removalList...)
+	if err != nil {
+		s.logger.Error("Failed to drop old chunks", "error", err)
+	}
+	s.chunks = newChunks
+	s.chunks.sort() // Ensure chunks are sorted after normalization
+
+	return nil
+}
+
+func (s *Store) dropChunks(chunks ...chunk) error {
+	for _, chk := range chunks {
+		if err := s.dropChunk(chk); err != nil {
+			return fmt.Errorf("failed to drop chunk %s: %w", chk.filename(), err)
+		}
+
+		if s.logger != nil {
+			s.logger.Info("Dropped chunk", "filename", chk.filename(),
+				"height_range", fmt.Sprintf("%d-%d", chk.fromHeight, chk.toHeight))
+		}
+	}
+	return nil
+}
+
+func (s *Store) dropChunk(chk chunk) error {
+	filePath := filepath.Join(s.dir, chk.filename())
+	if err := os.Remove(filePath); err != nil {
+		return fmt.Errorf("failed to remove chunk file %s: %w", filePath, err)
+	}
+
+	idx, ok := slices.BinarySearchFunc(s.chunks, chk, chunksCmpFunc)
+	if !ok {
+		return fmt.Errorf("chunk %s not found in store", chk.filename())
+	}
+	s.chunks = slices.Delete(s.chunks, idx, idx)
+
+	return nil
 }

@@ -2,6 +2,7 @@ package cometdump
 
 import (
 	"fmt"
+	"log/slog"
 	"os"
 	"slices"
 )
@@ -10,7 +11,7 @@ const chunkFilenameFormat = "%012d-%012d.msgpack.br"
 
 type chunks []chunk
 
-func readChunksList(dir string) (chunks, error) {
+func readChunksList(dir string, logger *slog.Logger) (chunks, error) {
 	files, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read directory %s: %w", dir, err)
@@ -26,8 +27,12 @@ func readChunksList(dir string) (chunks, error) {
 			continue
 		}
 		if !c.isValid() {
-			return nil, fmt.Errorf("invalid chunk file %s: %d-%d", file.Name(), c.fromHeight, c.toHeight)
+			logger.Warn("Invalid chunk file found, skipping", "file", file.Name())
+			continue
 		}
+
+		logger.Debug("Discovered chunk file", "file", file.Name(),
+			"height_range", fmt.Sprintf("%d-%d", c.fromHeight, c.toHeight), "length", c.length())
 		chunks = append(chunks, c)
 	}
 	chunks.sort()
@@ -71,14 +76,20 @@ func compareChunks(a, b chunk) int {
 }
 
 func (chks chunks) sort() {
-	slices.SortFunc(chks, func(a, b chunk) int {
-		if a.fromHeight < b.fromHeight {
-			return -1
-		} else if a.fromHeight > b.fromHeight {
-			return 1
-		}
-		return 0
-	})
+	slices.SortFunc(chks, chunksCmpFunc)
+}
+
+func chunksCmpFunc(a, b chunk) int {
+	if a.fromHeight < b.fromHeight {
+		return -1
+	} else if a.fromHeight > b.fromHeight {
+		return 1
+	} else if a.toHeight < b.toHeight {
+		return -1
+	} else if a.toHeight > b.toHeight {
+		return 1
+	}
+	return 0
 }
 
 func (chks chunks) validate() error {
@@ -106,4 +117,8 @@ func (c chunk) isValid() bool {
 
 func (c chunk) filename() string {
 	return fmt.Sprintf(chunkFilenameFormat, c.fromHeight, c.toHeight)
+}
+
+func (c chunk) length() int64 {
+	return c.toHeight - c.fromHeight + 1
 }

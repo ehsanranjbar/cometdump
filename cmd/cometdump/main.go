@@ -34,7 +34,7 @@ func main() {
 		Long:  "CometDump is a tool for syncing, serving, and querying CometBFT blockchain data.",
 	}
 
-	rootCmd.AddCommand(syncCmd(), serveCmd(), blockCmd(), blockResultsCmd())
+	rootCmd.AddCommand(syncCmd(), serveCmd(), blockCmd(), blockResultsCmd(), normalizeCmd())
 
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -59,14 +59,15 @@ func syncCmd() *cobra.Command {
 			logger := getLogger(cmd.Flags())
 
 			// Open store
-			store, err := cometdump.Open(dataDir)
+			store, err := cometdump.Open(cometdump.DefaultOpenOptions(dataDir).
+				WithLogger(logger))
 			if err != nil {
 				logger.Error("Failed to open store", "error", err)
 				os.Exit(1)
 			}
 
 			// Configure sync
-			config := cometdump.DefaultSyncConfig(remote).
+			config := cometdump.DefaultSyncOptions(remote).
 				WithChunkSize(chunkSize).
 				WithTargetHeight(height).
 				WithFetchSize(fetchSize).
@@ -139,7 +140,8 @@ func serveCmd() *cobra.Command {
 			logger := getLogger(cmd.Flags())
 
 			// Open store
-			store, err := cometdump.Open(dataDir)
+			store, err := cometdump.Open(cometdump.DefaultOpenOptions(dataDir).
+				WithLogger(logger))
 			if err != nil {
 				logger.Error("Failed to open store", "error", err)
 				os.Exit(1)
@@ -203,7 +205,8 @@ func blockCmd() *cobra.Command {
 			logger := getLogger(cmd.Flags())
 
 			// Open store
-			store, err := cometdump.Open(dataDir)
+			store, err := cometdump.Open(cometdump.DefaultOpenOptions(dataDir).
+				WithLogger(logger))
 			if err != nil {
 				logger.Error("Failed to open store", "error", err)
 				os.Exit(1)
@@ -260,7 +263,8 @@ func blockResultsCmd() *cobra.Command {
 			logger := getLogger(cmd.Flags())
 
 			// Open store
-			store, err := cometdump.Open(dataDir)
+			store, err := cometdump.Open(cometdump.DefaultOpenOptions(dataDir).
+				WithLogger(logger))
 			if err != nil {
 				logger.Error("Failed to open store", "error", err)
 				os.Exit(1)
@@ -325,4 +329,53 @@ func printEvents(indent string, events []abcitypes.Event) {
 			fmt.Printf("%s  - No attributes\n", indent)
 		}
 	}
+}
+
+func normalizeCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "normalize",
+		Short: "Normalize the chunks in the store to a specified size",
+		Run: func(cmd *cobra.Command, args []string) {
+			dataDir, _ := cmd.Flags().GetString("data-dir")
+			chunkSize, _ := cmd.Flags().GetInt64("chunk-size")
+			verbose, _ := cmd.Flags().GetBool("verbose")
+
+			if chunkSize <= 0 {
+				fmt.Fprintf(os.Stderr, "Error: --chunk-size must be greater than 0\n")
+				cmd.Usage()
+				os.Exit(1)
+			}
+
+			logLevel := slog.LevelInfo
+			if verbose {
+				logLevel = slog.LevelDebug
+			}
+			logger := slog.New(tint.NewHandler(os.Stdout, &tint.Options{
+				Level:      logLevel,
+				TimeFormat: time.RFC3339,
+			}))
+
+			// Open store
+			store, err := cometdump.Open(cometdump.DefaultOpenOptions(dataDir).
+				WithLogger(logger))
+			if err != nil {
+				logger.Error("Failed to open store", "error", err)
+				os.Exit(1)
+			}
+
+			// Normalize chunks
+			logger.Info("Normalizing chunks", "chunk_size", chunkSize)
+			if err := store.Normalize(chunkSize); err != nil {
+				logger.Error("Failed to normalize chunks", "error", err)
+				os.Exit(1)
+			}
+			logger.Info("Store normalized successfully", "chunk_size", chunkSize)
+		},
+	}
+
+	cmd.Flags().String("data-dir", defaultDataDir, "Directory containing blockchain data")
+	cmd.Flags().Int64("chunk-size", 10000, "Size of each chunk after normalization")
+	cmd.Flags().Bool("verbose", false, "Enable verbose logging")
+
+	return cmd
 }
