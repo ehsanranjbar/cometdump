@@ -1,14 +1,20 @@
 package cometdump
 
 import (
+	"bufio"
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"iter"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 
 	"github.com/Masterminds/semver"
@@ -31,12 +37,6 @@ type Store struct {
 type OpenOptions struct {
 	// Path to the store directory.
 	Path string
-	// Optional S3 compatible storage URL to fetch chunks from.
-	S3RemoteURL string
-	// ChecksumsFile is the path to a file containing checksums of the chunks.
-	ChecksumsFile string
-	// VerifyChecksums indicates whether to verify checksums of the chunks.
-	VerifyChecksums bool
 	// Logger is the logger to use for logging during store operations.
 	Logger *slog.Logger
 }
@@ -44,32 +44,11 @@ type OpenOptions struct {
 // DefaultOpenOptions provides default options for opening a store.
 func DefaultOpenOptions(path string) OpenOptions {
 	return OpenOptions{
-		Path:            path,
-		S3RemoteURL:     "",
-		ChecksumsFile:   "",
-		VerifyChecksums: false,
+		Path: path,
 		Logger: slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
 			Level: slog.LevelWarn,
 		})),
 	}
-}
-
-// WithS3RemoteURL sets the S3 compatible storage URL to fetch chunks from.
-func (o OpenOptions) WithS3RemoteURL(url string) OpenOptions {
-	o.S3RemoteURL = url
-	return o
-}
-
-// WithChecksumsFile sets the path to a file containing checksums of the chunks.
-func (o OpenOptions) WithChecksumsFile(file string) OpenOptions {
-	o.ChecksumsFile = file
-	return o
-}
-
-// WithVerifyChecksums sets whether to verify checksums of the chunks.
-func (o OpenOptions) WithVerifyChecksums(verify bool) OpenOptions {
-	o.VerifyChecksums = verify
-	return o
 }
 
 // WithLogger sets the logger for the store operations.
@@ -106,17 +85,111 @@ func Open(opts OpenOptions) (*Store, error) {
 		return nil, fmt.Errorf("failed to get chunks list: %w", err)
 	}
 
-	logger.Info("Opened store",
-		"path", opts.Path,
-		"height_range", fmt.Sprintf("%d-%d", chunks.startHeight(), chunks.endHeight()),
-		"chunks_count", len(chunks))
-
 	s := &Store{
 		dir:    opts.Path,
 		chunks: chunks,
 		logger: logger,
 	}
+	logger.Info("Opened store",
+		"path", opts.Path,
+		"height_range", fmt.Sprintf("%d-%d", chunks.startHeight(), chunks.endHeight()),
+		"chunks_count", len(chunks))
+
 	return s, nil
+}
+
+// VerifyIntegrity checks the integrity of the chunks in the store by verifying their sha256 checksums.
+func (s *Store) VerifyIntegrity(checksumFile string) error {
+	checksums, err := loadChecksums(checksumFile)
+	if err != nil {
+		return fmt.Errorf("failed to load checksums: %w", err)
+	}
+
+	var failed bool
+	for _, chk := range s.chunks {
+		checksum, ok := checksums[chk]
+		if !ok {
+			s.logger.Warn("No checksum found for chunk, skipping verification", "chunk", chk.filename())
+			continue
+		}
+
+		chunkPath := filepath.Join(s.dir, chk.filename())
+		if err := verifyFileChecksum(chunkPath, checksum); err != nil {
+			s.logger.Error("Checksum verification failed for chunk", "chunk", chk.filename(), "error", err)
+			failed = true
+		} else {
+			s.logger.Debug("Checksum verified for chunk",
+				"chunk", chk.filename(),
+				"checksum", hex.EncodeToString(checksum),
+			)
+		}
+	}
+
+	if failed {
+		return fmt.Errorf("some chunks failed checksum verification")
+	} else {
+		s.logger.Info("All chunks passed checksum verification")
+	}
+	return nil
+}
+
+func loadChecksums(checksumsFile string) (map[chunk][]byte, error) {
+	file, err := os.Open(checksumsFile)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open checksums file %s: %w", checksumsFile, err)
+	}
+	defer file.Close()
+
+	scanner := bufio.NewScanner(file)
+	checksums := make(map[chunk][]byte)
+	for scanner.Scan() {
+		line := scanner.Text()
+		parts := strings.Fields(line)
+		if len(parts) != 2 {
+			return nil, fmt.Errorf("invalid checksum line: %s", line)
+		}
+		checksum := parts[0]
+		chunkName := parts[1]
+		chk, err := parseChunkFilename(chunkName)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse chunk filename %s: %w", chunkName, err)
+		}
+		checksums[chk], err = hex.DecodeString(checksum)
+		if err != nil {
+			return nil, fmt.Errorf("failed to decode checksum %s: %w", checksum, err)
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("failed to read checksums file %s: %w", checksumsFile, err)
+	}
+
+	return checksums, nil
+}
+
+func verifyFileChecksum(filePath string, expectedChecksum []byte) error {
+	actualChecksum, err := computeFileChecksum(filePath)
+	if err != nil {
+		return fmt.Errorf("failed to compute checksum for file %s: %w", filePath, err)
+	}
+	if !bytes.Equal(actualChecksum, expectedChecksum) {
+		return fmt.Errorf("checksum mismatch for file %s: expected %x, got %x", filePath, expectedChecksum, actualChecksum)
+	}
+	return nil
+}
+
+func computeFileChecksum(filePath string) ([]byte, error) {
+	file, err := os.Open(filePath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open file %s: %w", filePath, err)
+	}
+	defer file.Close()
+
+	hasher := sha256.New()
+	if _, err := io.Copy(hasher, file); err != nil {
+		return nil, fmt.Errorf("failed to compute checksum for file %s: %w", filePath, err)
+	}
+	return hasher.Sum(nil), nil
 }
 
 // SyncOptions defines options for the Sync method.

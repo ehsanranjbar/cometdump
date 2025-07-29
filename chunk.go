@@ -22,8 +22,8 @@ func readChunksList(dir string, logger *slog.Logger) (chunks, error) {
 			continue
 		}
 
-		var c chunk
-		if _, err := fmt.Sscanf(file.Name(), chunkFilenameFormat, &c.fromHeight, &c.toHeight); err != nil {
+		c, err := parseChunkFilename(file.Name())
+		if err != nil {
 			continue
 		}
 		if !c.isValid() {
@@ -42,6 +42,14 @@ func readChunksList(dir string, logger *slog.Logger) (chunks, error) {
 	}
 
 	return chunks, nil
+}
+
+func parseChunkFilename(filename string) (chunk, error) {
+	var fromHeight, toHeight int64
+	if _, err := fmt.Sscanf(filename, chunkFilenameFormat, &fromHeight, &toHeight); err != nil {
+		return chunk{}, fmt.Errorf("failed to parse chunk filename %s: %w", filename, err)
+	}
+	return newChunk(fromHeight, toHeight), nil
 }
 
 func (chks chunks) startHeight() int64 {
