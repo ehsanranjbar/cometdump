@@ -16,13 +16,20 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/Masterminds/semver"
 	"github.com/andybalholm/brotli"
 	coretypes "github.com/cometbft/cometbft/v2/rpc/core/types"
 	"github.com/ehsanranjbar/cometdump/internal/chainutil"
 	"github.com/ehsanranjbar/cometdump/internal/jobqueue"
+	"github.com/vbauerster/mpb/v8"
+	"github.com/vbauerster/mpb/v8/decor"
 	"github.com/vmihailenco/msgpack/v5"
+)
+
+var (
+	barStyle = mpb.BarStyle().Lbound("╢").Filler("█").Tip("█").Padding("░").Rbound("╟")
 )
 
 // Store represents a directory where blocks are stored as chunks of data.
@@ -109,7 +116,7 @@ func (s *Store) VerifyIntegrity(checksumFile string) error {
 	for _, chk := range s.chunks {
 		checksum, ok := checksums[chk]
 		if !ok {
-			s.logger.Warn("No checksum found for chunk, skipping verification", "chunk", chk.filename())
+			s.logger.Warn("No checksum found for chunk", "chunk", chk.filename())
 			continue
 		}
 
@@ -213,6 +220,8 @@ type SyncOptions struct {
 	NumWorkers int
 	// OutputChan is a channel that can be optionally used to receive the BlockRecords as they are stored.
 	OutputChan chan<- *BlockRecord
+	// ProgressBar is the progress bar to use for displaying sync progress.
+	ProgressBar *mpb.Progress
 	// Logger is the logger to use for logging during the sync process.
 	Logger *slog.Logger
 }
@@ -307,6 +316,12 @@ func (opts SyncOptions) WithOutputChan(outputChan chan<- *BlockRecord) SyncOptio
 	return opts
 }
 
+// WithProgressBar sets the progress bar to use for displaying sync progress.
+func (opts SyncOptions) WithProgressBar(pBar *mpb.Progress) SyncOptions {
+	opts.ProgressBar = pBar
+	return opts
+}
+
 // WithLogger sets the logger for the sync operation.
 func (opts SyncOptions) WithLogger(logger *slog.Logger) SyncOptions {
 	if logger == nil {
@@ -372,10 +387,27 @@ func (s *Store) Sync(ctx context.Context, opts SyncOptions) error {
 
 	currentHeight := lastStoredHeight + 1
 	logger.Info("Syncing store", "from", currentHeight, "to", targetHeight)
+	var pbar *mpb.Bar
+	if opts.ProgressBar != nil {
+		pbar = opts.ProgressBar.New(
+			targetHeight,
+			barStyle,
+			mpb.BarPriority(1),
+			mpb.PrependDecorators(
+				decor.Name("Syncing", decor.WC{C: decor.DindentRight | decor.DextraSpace}),
+				decor.Percentage(decor.WCSyncWidth),
+			),
+			mpb.AppendDecorators(
+				decor.EwmaETA(decor.ET_STYLE_GO, 30, decor.WCSyncWidth),
+			),
+		)
+		pbar.SetCurrent(currentHeight - 1) // Start from the last stored height
+	}
 	for currentHeight < targetHeight {
+		now := time.Now()
 		queuedBlocks := queueFetchJobs(int64(opts.ChunkSize), int64(opts.FetchSize),
 			currentHeight, targetHeight, jobQueue)
-		blocks, blockResults, err := collectFetchResults(ctx, jobQueue, resultsChan, queuedBlocks, logger)
+		blocks, blockResults, err := collectFetchResults(ctx, jobQueue, resultsChan, queuedBlocks, opts.ProgressBar, logger)
 		if err != nil {
 			return fmt.Errorf("failed to collect fetch results: %w", err)
 		}
@@ -386,6 +418,10 @@ func (s *Store) Sync(ctx context.Context, opts SyncOptions) error {
 			return fmt.Errorf("failed to store records: %w", err)
 		}
 		s.insertChunk(chk)
+
+		if pbar != nil {
+			pbar.EwmaIncrInt64(chk.length(), time.Since(now))
+		}
 		s.logger.Info("Stored chunk", "filename", chk.filename(),
 			"height_range", fmt.Sprintf("%d-%d", chk.fromHeight, chk.toHeight))
 
@@ -408,6 +444,7 @@ type fetchJob struct {
 type fetchResult struct {
 	blocks       []*coretypes.ResultBlock
 	blockResults []*coretypes.ResultBlockResults
+	timeElapsed  time.Duration
 }
 
 // NoNodesAvailableForRangeError is returned when no nodes are available for the given height range.
@@ -437,6 +474,7 @@ func (e *fetchBlocksError) Error() string {
 
 func doFetch(nodes chainutil.Nodes) jobqueue.DoFunc[fetchJob, fetchResult] {
 	return func(ctx context.Context, job *fetchJob) (*fetchResult, error) {
+		now := time.Now()
 		nodes := nodes.ByHeightRange(job.startHeight, job.endHeight)
 		if len(nodes) == 0 {
 			return nil, &NoNodesAvailableForRangeError{
@@ -455,6 +493,7 @@ func doFetch(nodes chainutil.Nodes) jobqueue.DoFunc[fetchJob, fetchResult] {
 		return &fetchResult{
 			blocks:       blocks,
 			blockResults: blockResults,
+			timeElapsed:  time.Since(now),
 		}, nil
 	}
 }
@@ -490,12 +529,30 @@ func collectFetchResults(
 	jobQueue chan<- *fetchJob,
 	resultsChan <-chan jobqueue.JobResult[fetchJob, fetchResult],
 	resultsLimit int64,
+	progress *mpb.Progress,
 	logger *slog.Logger,
 ) (
 	blocks []*coretypes.ResultBlock,
 	blockResults []*coretypes.ResultBlockResults,
 	err error,
 ) {
+	var pbar *mpb.Bar
+	if progress != nil {
+		pbar = progress.New(
+			resultsLimit,
+			barStyle,
+			mpb.BarPriority(0),
+			mpb.BarRemoveOnComplete(),
+			mpb.PrependDecorators(
+				decor.Name("Chunk", decor.WC{C: decor.DindentRight | decor.DextraSpace}),
+				decor.Percentage(decor.WCSyncWidth),
+			),
+			mpb.AppendDecorators(
+				decor.EwmaETA(decor.ET_STYLE_GO, 30, decor.WCSyncWidth),
+			),
+		)
+	}
+
 	for {
 		select {
 		case jr := <-resultsChan:
@@ -518,6 +575,10 @@ func collectFetchResults(
 			}
 			blocks = append(blocks, jr.Result.blocks...)
 			blockResults = append(blockResults, jr.Result.blockResults...)
+
+			if pbar != nil {
+				pbar.EwmaIncrBy(len(jr.Result.blocks), jr.Result.timeElapsed)
+			}
 
 			if len(blocks) >= int(resultsLimit) {
 				return blocks, blockResults, nil
@@ -580,7 +641,8 @@ func pushToChannel[T any](records []T, outputChan chan<- T) {
 func (s *Store) storeRecords(recs []*BlockRecord) (chunk, error) {
 	startHeight := recs[0].Block.Height
 	endHeight := recs[len(recs)-1].Block.Height
-	file, err := s.createChunkFile(startHeight, endHeight)
+	chk := newChunk(startHeight, endHeight)
+	file, err := s.createChunkFile(chk)
 	if err != nil {
 		return chunk{}, fmt.Errorf("failed to create chunk file: %w", err)
 	}
@@ -607,13 +669,11 @@ func (s *Store) storeRecords(recs []*BlockRecord) (chunk, error) {
 		return chunk{}, fmt.Errorf("failed to close brotli writer: %w", err)
 	}
 
-	chk := newChunk(startHeight, endHeight)
 	return chk, nil
 }
 
-func (s *Store) createChunkFile(startHeight, endHeight int64) (*os.File, error) {
-	filename := fmt.Sprintf("%012d-%012d.msgpack.br", startHeight, endHeight)
-	filePath := filepath.Join(s.dir, filename)
+func (s *Store) createChunkFile(chk chunk) (*os.File, error) {
+	filePath := filepath.Join(s.dir, chk.filename())
 	file, err := os.OpenFile(filePath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open file %s: %w", filePath, err)

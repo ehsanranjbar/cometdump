@@ -19,6 +19,7 @@ import (
 	"github.com/lmittmann/tint"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
+	"github.com/vbauerster/mpb/v8"
 )
 
 const (
@@ -55,8 +56,22 @@ func syncCmd() *cobra.Command {
 			useLatestVersion, _ := cmd.Flags().GetBool("use-latest-version")
 			chunkSize, _ := cmd.Flags().GetInt("chunk-size")
 			numWorkers, _ := cmd.Flags().GetInt("workers")
+			verbose, _ := cmd.Flags().GetBool("verbose")
+			noProgress, _ := cmd.Flags().GetBool("no-progress")
 
 			logger := getLogger(cmd.Flags())
+			var pbar *mpb.Progress
+			if !noProgress {
+				pbar = mpb.New()
+				logLevel := slog.LevelInfo
+				if verbose {
+					logLevel = slog.LevelDebug
+				}
+				logger = slog.New(tint.NewHandler(pbar, &tint.Options{
+					Level:      logLevel,
+					TimeFormat: time.RFC3339,
+				}))
+			}
 
 			// Open store
 			store, err := cometdump.Open(cometdump.DefaultOpenOptions(dataDir).
@@ -74,6 +89,7 @@ func syncCmd() *cobra.Command {
 				WithNumWorkers(numWorkers).
 				WithExpandRemotes(expandRemotes).
 				WithUseLatestVersion(useLatestVersion).
+				WithProgressBar(pbar).
 				WithLogger(logger.With("module", "sync"))
 
 			// Start sync
@@ -113,6 +129,7 @@ func syncCmd() *cobra.Command {
 	cmd.Flags().Int("chunk-size", 10000, "Number of blocks per chunk file")
 	cmd.Flags().Int("workers", 4, "Number of concurrent workers")
 	cmd.Flags().Bool("verbose", false, "Enable verbose logging")
+	cmd.Flags().Bool("no-progress", false, "Show progress bar during sync")
 
 	return cmd
 }
