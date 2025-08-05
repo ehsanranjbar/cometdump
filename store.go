@@ -29,7 +29,7 @@ import (
 )
 
 var (
-	barStyle = mpb.BarStyle().Lbound("╢").Filler("█").Tip("█").Padding("░").Rbound("╟")
+	barStyle = mpb.BarStyle()
 )
 
 // Store represents a directory where blocks are stored as chunks of data.
@@ -387,22 +387,7 @@ func (s *Store) Sync(ctx context.Context, opts SyncOptions) error {
 
 	currentHeight := lastStoredHeight + 1
 	logger.Info("Syncing store", "from", currentHeight, "to", targetHeight)
-	var pbar *mpb.Bar
-	if opts.ProgressBar != nil {
-		pbar = opts.ProgressBar.New(
-			targetHeight,
-			barStyle,
-			mpb.BarPriority(1),
-			mpb.PrependDecorators(
-				decor.Name("Syncing", decor.WC{C: decor.DindentRight | decor.DextraSpace}),
-				decor.Percentage(decor.WCSyncWidth),
-			),
-			mpb.AppendDecorators(
-				decor.EwmaETA(decor.ET_STYLE_GO, 30, decor.WCSyncWidth),
-			),
-		)
-		pbar.SetCurrent(currentHeight - 1) // Start from the last stored height
-	}
+	syncProgress := buildSyncProgressBar(opts.ProgressBar, targetHeight, currentHeight)
 	for currentHeight < targetHeight {
 		now := time.Now()
 		queuedBlocks := queueFetchJobs(int64(opts.ChunkSize), int64(opts.FetchSize),
@@ -419,8 +404,8 @@ func (s *Store) Sync(ctx context.Context, opts SyncOptions) error {
 		}
 		s.insertChunk(chk)
 
-		if pbar != nil {
-			pbar.EwmaIncrInt64(chk.length(), time.Since(now))
+		if syncProgress != nil {
+			syncProgress.EwmaIncrInt64(chk.length(), time.Since(now))
 		}
 		s.logger.Info("Stored chunk", "filename", chk.filename(),
 			"height_range", fmt.Sprintf("%d-%d", chk.fromHeight, chk.toHeight))
@@ -498,6 +483,29 @@ func doFetch(nodes chainutil.Nodes) jobqueue.DoFunc[fetchJob, fetchResult] {
 	}
 }
 
+func buildSyncProgressBar(progress *mpb.Progress, targetHeight, currentHeight int64) *mpb.Bar {
+	if progress == nil {
+		return nil
+	}
+
+	pbar := progress.New(
+		targetHeight,
+		barStyle,
+		mpb.BarPriority(1),
+		mpb.PrependDecorators(
+			decor.CountersNoUnit("[%d / %d", decor.WCSyncSpaceR),
+			decor.Name(" | ", decor.WCSyncWidth),
+			decor.NewPercentage("%d]", decor.WCSyncWidth),
+		),
+		mpb.AppendDecorators(
+			decor.EwmaETA(decor.ET_STYLE_GO, 30, decor.WCSyncWidth),
+		),
+	)
+	pbar.SetCurrent(currentHeight - 1) // Start from the last stored height
+
+	return pbar
+}
+
 func queueFetchJobs(
 	chunkSize int64,
 	fetchSize int64,
@@ -538,19 +546,7 @@ func collectFetchResults(
 ) {
 	var pbar *mpb.Bar
 	if progress != nil {
-		pbar = progress.New(
-			resultsLimit,
-			barStyle,
-			mpb.BarPriority(0),
-			mpb.BarRemoveOnComplete(),
-			mpb.PrependDecorators(
-				decor.Name("Chunk", decor.WC{C: decor.DindentRight | decor.DextraSpace}),
-				decor.Percentage(decor.WCSyncWidth),
-			),
-			mpb.AppendDecorators(
-				decor.EwmaETA(decor.ET_STYLE_GO, 30, decor.WCSyncWidth),
-			),
-		)
+		pbar = buildFetchProgressBar(progress, resultsLimit)
 	}
 
 	for {
@@ -587,6 +583,27 @@ func collectFetchResults(
 			return nil, nil, fmt.Errorf("sync cancelled: %w", ctx.Err())
 		}
 	}
+}
+
+func buildFetchProgressBar(progress *mpb.Progress, total int64) *mpb.Bar {
+	if progress == nil {
+		return nil
+	}
+
+	return progress.New(
+		total,
+		barStyle,
+		mpb.BarPriority(0),
+		mpb.BarRemoveOnComplete(),
+		mpb.PrependDecorators(
+			decor.CountersNoUnit("[%d / %d", decor.WCSyncSpaceR),
+			decor.Name(" | ", decor.WCSyncWidth),
+			decor.NewPercentage("%d]", decor.WCSyncWidth),
+		),
+		mpb.AppendDecorators(
+			decor.AverageSpeed(nil, "%0.f blocks/s", decor.WCSyncWidth),
+		),
+	)
 }
 
 func blockRecordsFromRPCResults(
