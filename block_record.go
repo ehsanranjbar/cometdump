@@ -13,7 +13,7 @@ import (
 )
 
 func init() {
-	msgpack.Register(cmtproto.EvidenceList{},
+	msgpack.Register(cmtproto.Evidence{},
 		func(enc *msgpack.Encoder, v reflect.Value) error {
 			if msg, ok := v.Addr().Interface().(proto.Message); ok {
 				data, err := proto.Marshal(msg)
@@ -29,7 +29,7 @@ func init() {
 			if err != nil {
 				return fmt.Errorf("failed to decode bytes: %w", err)
 			}
-			var evidence cmtproto.EvidenceList
+			var evidence cmtproto.Evidence
 			err = proto.Unmarshal(data, &evidence)
 			if err != nil {
 				return fmt.Errorf("failed to unmarshal proto message: %w", err)
