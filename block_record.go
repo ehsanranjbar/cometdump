@@ -2,13 +2,45 @@ package cometdump
 
 import (
 	"fmt"
+	"reflect"
 
 	cmtproto "github.com/cometbft/cometbft/api/cometbft/types/v2"
 	abcitypes "github.com/cometbft/cometbft/v2/abci/types"
 	coretypes "github.com/cometbft/cometbft/v2/rpc/core/types"
 	cmtypes "github.com/cometbft/cometbft/v2/types"
+	proto "github.com/cosmos/gogoproto/proto"
 	msgpack "github.com/vmihailenco/msgpack/v5"
 )
+
+func init() {
+	msgpack.Register(cmtproto.EvidenceList{},
+		func(enc *msgpack.Encoder, v reflect.Value) error {
+			if msg, ok := v.Addr().Interface().(proto.Message); ok {
+				data, err := proto.Marshal(msg)
+				if err != nil {
+					return fmt.Errorf("failed to marshal proto message: %w", err)
+				}
+				return enc.EncodeBytes(data)
+			}
+			return fmt.Errorf("expected proto.Message, got %T", v)
+		},
+		func(dec *msgpack.Decoder, v reflect.Value) error {
+			data, err := dec.DecodeBytes()
+			if err != nil {
+				return fmt.Errorf("failed to decode bytes: %w", err)
+			}
+			var evidence cmtproto.EvidenceList
+			err = proto.Unmarshal(data, &evidence)
+			if err != nil {
+				return fmt.Errorf("failed to unmarshal proto message: %w", err)
+			}
+			if !v.CanSet() {
+				return fmt.Errorf("cannot set value for %T", v.Interface())
+			}
+			v.Set(reflect.ValueOf(evidence))
+			return nil
+		})
+}
 
 // BlockRecord is a structure that holds the details of a block, including its ID, transactions, events, and other related data.
 // It is used to encode and decode block data in a msgpack format.
@@ -44,6 +76,7 @@ func (b *BlockRecord) EncodeMsgpack(enc *msgpack.Encoder) error {
 			return fmt.Errorf("failed to convert Block to proto: %w", err)
 		}
 	}
+	bp.Marshal()
 	if err := enc.Encode(bp); err != nil {
 		return fmt.Errorf("failed to encode Block: %w", err)
 	}
