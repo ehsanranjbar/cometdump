@@ -47,6 +47,20 @@ func (nodes Nodes) ByHeightRange(minHeight, maxHeight int64) Nodes {
 	return filteredNodes
 }
 
+// EarliestAvailableHeight returns the minimum earliest height among the discovered nodes.
+func (nodes Nodes) EarliestAvailableHeight() int64 {
+	if len(nodes) == 0 {
+		return 0
+	}
+	minHeight := nodes[0].EarliestHeight
+	for _, node := range nodes {
+		if node.EarliestHeight < minHeight {
+			minHeight = node.EarliestHeight
+		}
+	}
+	return minHeight
+}
+
 // LatestAvailableHeight returns the maximum latest height among the discovered nodes.
 func (nodes Nodes) LatestAvailableHeight() int64 {
 	if len(nodes) == 0 {
