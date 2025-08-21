@@ -6,6 +6,7 @@ import (
 
 	rpcclient "github.com/cometbft/cometbft/v2/rpc/client/http"
 	coretypes "github.com/cometbft/cometbft/v2/rpc/core/types"
+	"github.com/cometbft/cometbft/v2/rpc/jsonrpc/types"
 )
 
 // FetchBlocks fetches blocks and their results from the CometBFT RPC server.
@@ -23,12 +24,16 @@ func FetchBlocks(ctx context.Context, rpc *rpcclient.HTTP, fromHeight, toHeight 
 	}
 
 	var blocks []*coretypes.ResultBlock
-	for i := 0; i < len(responses); i += 2 {
-		blocks = append(blocks, responses[i].(*coretypes.ResultBlock))
-	}
 	var blockResults []*coretypes.ResultBlockResults
-	for i := 1; i < len(responses); i += 2 {
-		blockResults = append(blockResults, responses[i].(*coretypes.ResultBlockResults))
+	for i := 0; i < len(responses); i += 1 {
+		switch resp := responses[i].(type) {
+		case *coretypes.ResultBlock:
+			blocks = append(blocks, resp)
+		case *coretypes.ResultBlockResults:
+			blockResults = append(blockResults, resp)
+		case *types.RPCError:
+			return nil, nil, fmt.Errorf("error fetching block %d: %s", int(fromHeight)+i/2, resp.Error())
+		}
 	}
 
 	return blocks, blockResults, nil
