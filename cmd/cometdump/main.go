@@ -50,7 +50,8 @@ func syncCmd() *cobra.Command {
 		Run: func(cmd *cobra.Command, args []string) {
 			dataDir, _ := cmd.Flags().GetString("data-dir")
 			remote, _ := cmd.Flags().GetString("remote")
-			height, _ := cmd.Flags().GetInt64("height")
+			base, _ := cmd.Flags().GetInt64("base")
+			target, _ := cmd.Flags().GetInt64("target")
 			fetchSize, _ := cmd.Flags().GetInt("fetch-size")
 			expandRemotes, _ := cmd.Flags().GetBool("expand-remotes")
 			useLatestVersion, _ := cmd.Flags().GetBool("use-latest-version")
@@ -84,7 +85,8 @@ func syncCmd() *cobra.Command {
 			// Configure sync
 			config := cometdump.DefaultSyncOptions(remote).
 				WithChunkSize(chunkSize).
-				WithTargetHeight(height).
+				WithBaseHeight(base).
+				WithTargetHeight(target).
 				WithFetchSize(fetchSize).
 				WithNumWorkers(numWorkers).
 				WithExpandRemotes(expandRemotes).
@@ -122,7 +124,8 @@ func syncCmd() *cobra.Command {
 
 	cmd.Flags().String("data-dir", defaultDataDir, "Directory to store blockchain data")
 	cmd.Flags().String("remote", defaultRemote, "Remote CometBFT node URL")
-	cmd.Flags().Int64("height", 0, "Sync up to this height (0 for latest)")
+	cmd.Flags().Int64("base", 0, "Base height to start syncing from (0 for latest)")
+	cmd.Flags().Int64("target", 0, "Sync up to this height (0 for latest)")
 	cmd.Flags().Int("fetch-size", 100, "Number of blocks to fetch in each request")
 	cmd.Flags().Bool("expand-remotes", true, "Discover additional nodes from the network")
 	cmd.Flags().Bool("use-latest-version", true, "Use nodes with the latest application version")
@@ -338,8 +341,8 @@ func printEvents(indent string, events []abcitypes.Event) {
 	for _, event := range events {
 		fmt.Printf("%s- Type: %s\n", indent, event.Type)
 		for _, attr := range event.Attributes {
-			key, _ := base64.StdEncoding.DecodeString(attr.Key)
-			value, _ := base64.StdEncoding.DecodeString(attr.Value)
+			key := string(attr.Key)
+			value := string(attr.Value)
 			fmt.Printf("%s  - %s: %s\n", indent, key, value)
 		}
 		if len(event.Attributes) == 0 {
