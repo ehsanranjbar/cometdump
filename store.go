@@ -100,6 +100,14 @@ func Open(opts OpenOptions) (*Store, error) {
 	return s, nil
 }
 
+// Chunks returns a copy of the list of chunks in the store.
+func (s *Store) Chunks() []Chunk {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	return slices.Clone(s.chunks)
+}
+
 // VerifyIntegrity checks the integrity of the chunks in the store by verifying their sha256 checksums.
 func (s *Store) VerifyIntegrity(checksumFile string) error {
 	checksums, err := loadChecksums(checksumFile)
@@ -135,7 +143,7 @@ func (s *Store) VerifyIntegrity(checksumFile string) error {
 	return nil
 }
 
-func loadChecksums(checksumsFile string) (map[chunk][]byte, error) {
+func loadChecksums(checksumsFile string) (map[Chunk][]byte, error) {
 	var (
 		file io.ReadCloser
 		err  error
@@ -156,7 +164,7 @@ func loadChecksums(checksumsFile string) (map[chunk][]byte, error) {
 	}
 
 	scanner := bufio.NewScanner(file)
-	checksums := make(map[chunk][]byte)
+	checksums := make(map[Chunk][]byte)
 	for scanner.Scan() {
 		line := scanner.Text()
 		parts := strings.Fields(line)
@@ -229,16 +237,16 @@ func (s *Store) Blocks(args ...int64) iter.Seq2[*BlockRecord, error] {
 		defer s.mu.RUnlock()
 
 		for _, chk := range s.chunks {
-			if chk.toHeight < startHeight {
+			if chk.ToHeight < startHeight {
 				continue
 			}
-			if chk.fromHeight > endHeight {
+			if chk.FromHeight > endHeight {
 				return
 			}
 
 			skip := 0
-			if chk.fromHeight < startHeight && chk.toHeight >= startHeight {
-				skip = int(startHeight - chk.fromHeight)
+			if chk.FromHeight < startHeight && chk.ToHeight >= startHeight {
+				skip = int(startHeight - chk.FromHeight)
 			}
 
 			iter, err := s.iterChunk(chk, skip)
@@ -260,7 +268,7 @@ func (s *Store) Blocks(args ...int64) iter.Seq2[*BlockRecord, error] {
 	}
 }
 
-func (s *Store) iterChunk(chk chunk, skip int) (iter.Seq2[*BlockRecord, error], error) {
+func (s *Store) iterChunk(chk Chunk, skip int) (iter.Seq2[*BlockRecord, error], error) {
 	file, err := s.openChunk(chk)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open chunk file %s: %w", chk.filename(), err)
@@ -298,7 +306,7 @@ func (s *Store) iterChunk(chk chunk, skip int) (iter.Seq2[*BlockRecord, error], 
 	}, nil
 }
 
-func (s *Store) openChunk(chk chunk) (*os.File, error) {
+func (s *Store) openChunk(chk Chunk) (*os.File, error) {
 	filePath := filepath.Join(s.dir, chk.filename())
 	file, err := os.Open(filePath)
 	if err != nil {
@@ -320,7 +328,7 @@ func (s *Store) BlockAt(height int64) (*BlockRecord, error) {
 	if !ok {
 		return nil, fmt.Errorf("block at height %d not found", height)
 	}
-	skip := int(height - chk.fromHeight)
+	skip := int(height - chk.FromHeight)
 	iter, err := s.iterChunk(chk, skip)
 	if err != nil {
 		return nil, fmt.Errorf("failed to iterate chunk %s: %w", chk.filename(), err)
@@ -350,7 +358,7 @@ func (s *Store) Normalize(chunkSize int64) error {
 
 	buf := make([]*BlockRecord, 0, chunkSize)
 	newChunks := make(chunks, 0, (s.chunks.endHeight()-s.chunks.startHeight()+1)/int64(chunkSize))
-	removalList := make([]chunk, 0)
+	removalList := make([]Chunk, 0)
 	for i, chk := range s.chunks {
 		// Skip chunks that are either exactly of the specified size or the last chunk that is smaller than the size.
 		if len(buf) == 0 && (chk.length() == chunkSize || (i == len(s.chunks)-1 && chk.length() <= chunkSize)) {
@@ -374,7 +382,7 @@ func (s *Store) Normalize(chunkSize int64) error {
 				}
 				newChunks = append(newChunks, newChunk)
 				s.logger.Info("Stored chunk", "filename", newChunk.filename(),
-					"height_range", fmt.Sprintf("%d-%d", newChunk.fromHeight, newChunk.toHeight))
+					"height_range", fmt.Sprintf("%d-%d", newChunk.FromHeight, newChunk.ToHeight))
 				buf = buf[:0] // Reset buffer after storing
 
 				err = s.dropChunks(removalList...)
@@ -396,7 +404,7 @@ func (s *Store) Normalize(chunkSize int64) error {
 		}
 		newChunks = append(newChunks, newChunk)
 		s.logger.Info("Stored chunk", "filename", newChunk.filename(),
-			"height_range", fmt.Sprintf("%d-%d", newChunk.fromHeight, newChunk.toHeight))
+			"height_range", fmt.Sprintf("%d-%d", newChunk.FromHeight, newChunk.ToHeight))
 	}
 
 	// Drop remaining marked chunks
@@ -410,7 +418,7 @@ func (s *Store) Normalize(chunkSize int64) error {
 	return nil
 }
 
-func (s *Store) dropChunks(chunks ...chunk) error {
+func (s *Store) dropChunks(chunks ...Chunk) error {
 	for _, chk := range chunks {
 		if err := s.dropChunk(chk); err != nil {
 			return fmt.Errorf("failed to drop chunk %s: %w", chk.filename(), err)
@@ -418,13 +426,13 @@ func (s *Store) dropChunks(chunks ...chunk) error {
 
 		if s.logger != nil {
 			s.logger.Info("Dropped chunk", "filename", chk.filename(),
-				"height_range", fmt.Sprintf("%d-%d", chk.fromHeight, chk.toHeight))
+				"height_range", fmt.Sprintf("%d-%d", chk.FromHeight, chk.ToHeight))
 		}
 	}
 	return nil
 }
 
-func (s *Store) dropChunk(chk chunk) error {
+func (s *Store) dropChunk(chk Chunk) error {
 	filePath := filepath.Join(s.dir, chk.filename())
 	if err := os.Remove(filePath); err != nil {
 		return fmt.Errorf("failed to remove chunk file %s: %w", filePath, err)

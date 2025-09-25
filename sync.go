@@ -248,7 +248,7 @@ func (s *Store) Sync(ctx context.Context, opts SyncOptions) error {
 			syncProgress.EwmaIncrInt64(chk.length(), time.Since(now))
 		}
 		s.logger.Info("Stored chunk", "filename", chk.filename(),
-			"height_range", fmt.Sprintf("%d-%d", chk.fromHeight, chk.toHeight))
+			"height_range", fmt.Sprintf("%d-%d", chk.FromHeight, chk.ToHeight))
 
 		currentHeight += queuedBlocks
 	}
@@ -495,13 +495,13 @@ func pushToChannel[T any](records []T, outputChan chan<- T) {
 	}
 }
 
-func (s *Store) storeRecords(recs []*BlockRecord) (chunk, error) {
+func (s *Store) storeRecords(recs []*BlockRecord) (Chunk, error) {
 	startHeight := recs[0].Block.Height
 	endHeight := recs[len(recs)-1].Block.Height
 	chk := newChunk(startHeight, endHeight)
 	file, err := s.createChunkFile(chk)
 	if err != nil {
-		return chunk{}, fmt.Errorf("failed to create chunk file: %w", err)
+		return Chunk{}, fmt.Errorf("failed to create chunk file: %w", err)
 	}
 	defer file.Close()
 
@@ -514,22 +514,22 @@ func (s *Store) storeRecords(recs []*BlockRecord) (chunk, error) {
 	enc.EncodeArrayLen(len(recs)) // Each block and its results
 	for _, rec := range recs {
 		if err := enc.Encode(rec); err != nil {
-			return chunk{}, fmt.Errorf("failed to encode BlockRecord: %w", err)
+			return Chunk{}, fmt.Errorf("failed to encode BlockRecord: %w", err)
 		}
 	}
 	err = wr.Flush()
 	if err != nil {
-		return chunk{}, fmt.Errorf("failed to flush brotli writer: %w", err)
+		return Chunk{}, fmt.Errorf("failed to flush brotli writer: %w", err)
 	}
 	err = wr.Close()
 	if err != nil {
-		return chunk{}, fmt.Errorf("failed to close brotli writer: %w", err)
+		return Chunk{}, fmt.Errorf("failed to close brotli writer: %w", err)
 	}
 
 	return chk, nil
 }
 
-func (s *Store) createChunkFile(chk chunk) (*os.File, error) {
+func (s *Store) createChunkFile(chk Chunk) (*os.File, error) {
 	filePath := filepath.Join(s.dir, chk.filename())
 	file, err := os.OpenFile(filePath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
 	if err != nil {
@@ -538,7 +538,7 @@ func (s *Store) createChunkFile(chk chunk) (*os.File, error) {
 	return file, nil
 }
 
-func (s *Store) insertChunk(chk chunk) {
+func (s *Store) insertChunk(chk Chunk) {
 	idx, _ := slices.BinarySearchFunc(s.chunks, chk, chunksCmpFunc)
 	s.chunks = slices.Insert(s.chunks, idx, chk)
 }
