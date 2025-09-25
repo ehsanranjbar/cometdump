@@ -10,6 +10,8 @@ import (
 	"io"
 	"iter"
 	"log/slog"
+	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
@@ -134,11 +136,24 @@ func (s *Store) VerifyIntegrity(checksumFile string) error {
 }
 
 func loadChecksums(checksumsFile string) (map[chunk][]byte, error) {
-	file, err := os.Open(checksumsFile)
-	if err != nil {
-		return nil, fmt.Errorf("failed to open checksums file %s: %w", checksumsFile, err)
+	var (
+		file io.ReadCloser
+		err  error
+	)
+	if _, err = url.Parse(checksumsFile); err == nil {
+		resp, err := http.Get(checksumsFile)
+		if err != nil {
+			return nil, fmt.Errorf("failed to fetch checksums file from URL %s: %w", checksumsFile, err)
+		}
+		defer resp.Body.Close()
+		file = resp.Body
+	} else {
+		file, err = os.Open(checksumsFile)
+		if err != nil {
+			return nil, fmt.Errorf("failed to open checksums file %s: %w", checksumsFile, err)
+		}
+		defer file.Close()
 	}
-	defer file.Close()
 
 	scanner := bufio.NewScanner(file)
 	checksums := make(map[chunk][]byte)
